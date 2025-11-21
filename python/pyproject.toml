@@ -22,6 +22,7 @@ dependencies = [
     "grandalf>=0.8",
     "nest-asyncio>=1.6.0",
     "pyppeteer>=2.0.0",
+    "rich>=14.2.0",
 ]
 
 [project.optional-dependencies]
