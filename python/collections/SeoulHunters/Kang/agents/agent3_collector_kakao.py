@@ -1,14 +1,14 @@
 from state import AgentState, CandidatePlace
 from tools import search_kakao
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from langchain_openai import ChatOpenAI
 from langchain_core.messages import SystemMessage
 import json
 
 class Satisfied(BaseModel):
-    satisfy: bool
+    satisfy: bool = Field(description="조건 충족 여부 (True/False)")
 
-def collector_node(state: AgentState):
+def collector_node_kakao(state: AgentState):
     print("\n🏃 --- [Agent 3] 메인 장소 후보군(Pool) 대량 수집 중 ---")
     
     strategy = state['strategy']
@@ -49,11 +49,7 @@ def collector_node(state: AgentState):
         print(f"   🔎 [Collect] '{tag_name}' (Weight {weight}) | 키워드당 {search_limit}개 검색 시작...")
         for kw in keywords:
             places = search_kakao(kw, search_limit)
-            print(kw)
-            print(places)
             for p in places:
-                print(p)
-
                 system_prompt = f"""
                 당신은 검색 결과 검증기입니다.
                 사용자가 입력한 **'검색 키워드'**와 API가 반환한 **'장소 정보'**가 논리적으로 일치하는지 O/X로 판단하세요.

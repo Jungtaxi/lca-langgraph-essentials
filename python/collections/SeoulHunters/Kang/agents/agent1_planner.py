@@ -35,8 +35,8 @@ def planner_node(state: AgentState):
    2. **데이터 매핑 (Internal)**: 사용자가 외국어로 말하더라도, 추출하는 값은 반드시 스키마에 정의된 **'한국어 표준 값'**으로 변환하여 저장하세요.
       - 예: User "I want to go shopping" -> themes=['쇼핑'] (NOT 'Shopping')
       - 예: User "電車で行きます (전철로 갈래요)" -> transport='대중교통'
-   3. **질문 생성 (External)**: `missing_info_question`은 반드시 **사용자가 입력한 언어**로 작성하세요.
-      - 예: 사용자가 일본어로 말했으면, 질문도 일본어로 생성.
+   3. **질문 생성 (External)**: `missing_info_question`만 반드시 **사용자가 입력한 언어**로 작성하세요.
+      - 예: 사용자가 일본어로 말했으면, 질문만 일본어로 생성.
    
    [지시사항]
    - 위 6가지 중 하나라도 값이 없거나(None), 빈 리스트라면 'is_complete'는 False입니다.

@@ -51,7 +51,7 @@ class TripPreferences(BaseModel):
     )
     
     # 6. 이동 방식
-    transport: Optional[Literal['대중교통', '도보', '자차', '택시']] = Field(
+    transport: Optional[Literal['대중교통', '걷기', '자차', '택시']] = Field(
         None,
         description="선호하는 이동수단. 사용자의 입력에서 유추할 수 있는 이동수단을 선택하세요."
     )
@@ -82,7 +82,7 @@ class TripPreferences(BaseModel):
     # 10. 사용자의 사용 언어
     language: str = Field(
         None,
-        description="사용자가 입력한 언어(한/영/일/중 등)를 감지하세요. 그리고 해당 언어를 영어로 작성합니다. 예: Korean"
+        description="사용자가 입력한 언어(한/영/일/중 등)를 감지하세요. 그리고 해당 언어를 영어로 작성합니다.(예: Korean, English, Japanese, Chinese)"
     )
 
 class CategoryAllocation(BaseModel):
@@ -95,10 +95,10 @@ class CategoryAllocation(BaseModel):
         검색 정확도를 높이기 위한 구체적인 키워드 리스트.
         
         [필수 규칙]
-        1. **다양성 확보**: 단순히 '맛집' 하나만 쓰지 말고, 구체적인 메뉴나 업종으로 확장해서 **최소 3~5개 이상** 작성하세요.
+        1. **다양성 확보**: 단순히 '맛집' 하나만 쓰지 말고, 구체적인 메뉴나 업종으로 확장해서 **최소 3개** 작성하세요.
            - (Bad) ['연남동 맛집']
-           - (Good) ['연남동 맛집', '연남동 파스타', '연남동 스테이크', '연남동 일식', '연남동 브런치']
-        2. **쇼핑 예시**: '연남동 쇼핑' (X) -> ['연남동 옷가게', '연남동 소품샵', '연남동 악세서리', '연남동 빈티지샵'] (O)
+           - (Good) ['연남동 맛집', '연남동 일식', '연남동 브런치']
+        2. **쇼핑 예시**: ['연남동 쇼핑', '연남동 옷가게', '연남동 빈티지샵'] (O)
         3. **형식**: 무조건 **"{지역명} {명사}"** 형태 유지.
         """
     )
