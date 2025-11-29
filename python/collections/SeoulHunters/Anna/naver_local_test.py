@@ -65,7 +65,7 @@ def search_local_places(query: str, display: int = 5, start: int = 1, sort: str 
 
 
 if __name__ == "__main__":
-    query = "종로 유적지"
+    query = "연남동 한식"
     results = search_local_places(query, display=5, sort="random") # sort='comment' -> 리뷰순, random -> 정확도
 
     print(f"검색어: {query}")

@@ -44,7 +44,7 @@ def search_local_places(query: str, display: int = 5, start: int = 1, sort: str 
 
     data = resp.json()
 
-    # 필요한 정보만 깔끔하게 정리해서 리턴
+    # 필요한 정보만 깔끔하게 정리해서 리턴 
     places = []
     for item in data.get("items", []):
         places.append(

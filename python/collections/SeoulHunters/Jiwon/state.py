@@ -39,3 +39,5 @@ class AgentState(TypedDict, total=False):
     tag_plan: Any
     place_pool: List[Place]
     routes: Any
+    main_place_candidates: Optional[List[Place]]
+    selected_main_places: Optional[List[Place]]

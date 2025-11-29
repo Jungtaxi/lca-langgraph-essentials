@@ -6,6 +6,8 @@ def _place_dict(p):
         return p.model_dump()
     return dict(p)
 
+# 먼저 추천 하나 뱉고 그거랑 가까운 곳들로 동선 구성하기
+# Base_slots랑 slot_theme_priority이런거를 agent에 맡기기
 BASE_SLOTS = ["morning","lunch","afternoon","snack","dinner","night"]
 
 SLOT_THEME_PRIORITIES = {
@@ -68,7 +70,6 @@ def _sort_places_by_route(places: List[Dict]) -> List[Dict]:
         ordered.append(current)
 
     return ordered
-
 
 def _pick_place_for_slot(slot: str, buckets: Dict[str, List[Dict]]) -> Dict | None:
     """
