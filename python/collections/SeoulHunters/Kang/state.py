@@ -32,7 +32,7 @@ class TripPreferences(BaseModel):
         정해진 카테고리에 얽매이지 말고, 구체적이고 다양한 테마를 자유롭게 추출하세요.
         
         [작성 규칙]
-        1. **명사형 키워드**로 작성할 것. (예: '맛집 탐방', '빵지순례', '호캉스', '역사 투어', '아이돌 덕질')
+        1. **명사형 키워드**로 작성할 것. (예: '미식', '쇼핑', '호캉스', '문화', '야경', '힐링', '액티비티', '트렌드', '데이트', '가족여행', 등)
         2. 사용자의 의도를 반영하는 키워드를 **최소 2개 이상** 풍부하게 뽑을 것.
         3. 예: "조용히 책 읽고 싶어" -> ['독서', '힐링', '조용한 카페']
         """
@@ -51,9 +51,9 @@ class TripPreferences(BaseModel):
     )
     
     # 6. 이동 방식
-    transport: Optional[Literal['대중교통', '도보', '차량']] = Field(
+    transport: Optional[Literal['대중교통', '도보', '자차', '택시']] = Field(
         None,
-        description="이동 수단 선호. 사용자의 입력에서 유추할 수 있는 **모든** 테마를 전부 선택하세요. 하나만 선택하지 말고, 해당되는 것은 다 포함시키세요. 정보가 없다면 None"
+        description="선호하는 이동수단. 사용자의 입력에서 유추할 수 있는 이동수단을 선택하세요."
     )
 
     # 7. HITL 필수 필드 (대화 제어용)
@@ -86,22 +86,26 @@ class TripPreferences(BaseModel):
     )
 
 class CategoryAllocation(BaseModel):
-    category_group_code: Literal[
-        'FD6', 'CE7', 'CT1', 'AT4', 'AD5', # 핵심 (식음료, 관광, 숙박)
-        'PK6', 'OL7', 'SW8',               # 교통 (주차, 주유, 지하철)
-        'MT1', 'CS2'                       # 편의 (마트, 편의점)
-        # HP8(병원), PM9(약국) 등은 특수 상황 아니면 제외 (필요시 추가 가능)
-    ] = Field(
-            description = "Kakao Map API의 카테고리 그룹 코드(MT1:대형마트, CS2:편의점, PS3:어린이집, 유치원, SC4:학교, AC5:학원, PK6:주차장, OL7:주유소, 충전소, SW8:지하철역, BK9:은행, CT1:문화시설, AG2:중개업소, PO3:공공기관, AT4:관광명소, AD5:숙박, FD6:음식점, CE7:카페, HP8:병원, PM9:약국)"
+    tag_name: str = Field(
+        description="테마에 맞는 태그 (예: 맛집, 카페, 관광지, 옷가게, 신발가게 등)"
     )
     
     keywords: List[str] = Field(
-        description="인터넷 검색할 때 필요한 구체적인 키워드 리스트. Agent 1이 정한 지역명을 포함해서 작성한다."
+        description="""
+        검색 정확도를 높이기 위한 구체적인 키워드 리스트.
+        
+        [필수 규칙]
+        1. **다양성 확보**: 단순히 '맛집' 하나만 쓰지 말고, 구체적인 메뉴나 업종으로 확장해서 **최소 3~5개 이상** 작성하세요.
+           - (Bad) ['연남동 맛집']
+           - (Good) ['연남동 맛집', '연남동 파스타', '연남동 스테이크', '연남동 일식', '연남동 브런치']
+        2. **쇼핑 예시**: '연남동 쇼핑' (X) -> ['연남동 옷가게', '연남동 소품샵', '연남동 악세서리', '연남동 빈티지샵'] (O)
+        3. **형식**: 무조건 **"{지역명} {명사}"** 형태 유지.
+        """
     )
 
-    count: int = Field(description="필요한 장소의 개수. 하루에 방문할 만한 최대 횟수를 기록한다. (여행 기간에 비례)") # 수정
+    count: int = Field(description="count는 일정 일수(duration) + 강도(intensity) 기반으로 합리적인 정수.") # 수정
 
-    weight: int = Field(description="검색 우선순위 가중치 (1~10). 점수가 높을수록 '여행의 메인 목적'이며, 먼저 검색되어 기준점(Anchor)이 됩니다.") # 수정
+    weight: float = Field(description="검색 우선순위 가중치 (0.0 ~ 1.0). 점수가 높을수록 '여행의 메인 목적'이며, 먼저 검색되어 기준점(Anchor)이 됩니다. 전체 합은 약 1.0이 되어야 함.") # 수정
 
     reason: str = Field(
         description="해당 category_group_code들을 선택한 이유"
@@ -109,18 +113,18 @@ class CategoryAllocation(BaseModel):
 
 class ItineraryStrategy(BaseModel):
     allocations: List[CategoryAllocation] = Field(
-        description="카테고리 코드별 할당 리스트"
+        description="태그별 할당 리스트"
     )
 
 class CandidatePlace(BaseModel):
     place_name: str
     address: str
     category: str      # 카테고리 이름 (예: 음식점 > 한식)
-    code: str          # 카테고리 코드 (FD6 등)
+    tag_name: str      # 테마 이름 (예: 맛집, 카페, 관광지 등)
     place_url: str
     x: float           # 경도 (Longitude) - 계산을 위해 float 변환
     y: float           # 위도 (Latitude)
-    weight: int        # 중요도 (Agent 2에서 받음)
+    weight: float        # 중요도 (Agent 2에서 받음)
     keyword: str       # 검색 키워드
 
 class AgentState(TypedDict):

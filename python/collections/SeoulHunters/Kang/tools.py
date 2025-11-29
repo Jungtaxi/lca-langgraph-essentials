@@ -4,7 +4,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-def search_kakao(query, n, code=None, sort_type='accuracy', x=None, y=None):
+def search_kakao(query, n, sort_type='accuracy', x=None, y=None):
     api_key = os.environ.get("KAKAO_REST_API_KEY")
     if not api_key:
         print("🚨 Error: KAKAO_REST_API_KEY 환경변수가 없습니다.")
@@ -14,7 +14,6 @@ def search_kakao(query, n, code=None, sort_type='accuracy', x=None, y=None):
     headers = {"Authorization": f"KakaoAK {api_key}"}
     params = {
         "query": query,
-        "category_group_code": code,
         "size": n,
         "sort": sort_type
     }
@@ -26,6 +25,7 @@ def search_kakao(query, n, code=None, sort_type='accuracy', x=None, y=None):
 
     try:
         resp = requests.get(url, headers=headers, params=params)
+        print(resp.json().get('documents', []))
         resp.raise_for_status()
         return resp.json().get('documents', [])
     except Exception as e:

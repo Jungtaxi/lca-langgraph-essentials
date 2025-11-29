@@ -98,8 +98,8 @@ def bot_turn(history, thread_id):
                 # 리스트 포맷팅 로직
                 details = []
                 for alloc in strategy.allocations:
-                    # FD6 -> 음식점 변환
-                    cat_name = CATEGORY_CODES.get(alloc.category_group_code, alloc.category_group_code)
+                    
+                    cat_name = alloc.tag_name
                     
                     # 한 줄 요약 작성
                     # 예: "- [음식점] (Weight 10): 맛집 테마 반영"
