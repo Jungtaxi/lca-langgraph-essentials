@@ -1,239 +1,409 @@
-# agents/agent5_route.py
-
-from typing import Any, Dict, List, Optional
+import json
+from typing import Any, Dict, List
 from state import AgentState
+from openai import OpenAI
+
+client = OpenAI()  # 이미 어딘가에 있다면 재사용
 
 def _place_dict(p: Any) -> Dict:
     if hasattr(p, "model_dump"):
         return p.model_dump()
     return dict(p)
 
-# 우리가 비율로 다룰 메인 테마들
-MAIN_TAGS = ["음식점", "카페", "쇼핑"]
+ROUTE_SYSTEM_PROMPT ='''
+당신은 사용자의 취향과 장소 목록을 바탕으로 '여행 동선'을 짜는 전문가입니다.
 
-def _build_theme_counts_per_day(tag_plan: List[Dict], intensity: int) -> Dict[str, int]:
-    """
-    tag_plan의 weight 를 이용해
-    '하루에 각 테마별로 몇 군데 갈지'를 계산.
-    예: 5스팟/day이면 음식점2, 카페1, 쇼핑2 이런 식.
-    """
-    # 1) 하루에 몇 스팟 갈지 intensity로 결정
-    #    대충: 힐링(<=30): 4, 보통(<=60):5, 빡셈:6
-    if intensity is None:
-        intensity = 50
-    try:
-        intensity = int(intensity)
-    except Exception:
-        intensity = 50
+[입력 설명]
+- prefs: 사용자의 취향 설정. 
+  - intensity: 0~100 (낮을수록 느긋, 높을수록 빡센 일정)
+  - duration: 여행 일수 (정수)
+- tag_plan: 각 테마별(weight) 비율 정보. 
+  - 예: [{"tag": "음식점", "weight": 0.5}, {"tag":"카페","weight":0.3}, {"tag":"쇼핑","weight":0.2}]
+- place_pool: 추천 가능한 장소 목록.
+  - 각 원소는 {"id": int, "name": str, "theme": str, "address": str, "road_address": str, ...}
+  - theme 예: "음식점", "카페", "쇼핑", "술집" 등
+- selected_main_places: 사용자가 반드시 가고 싶다고 고른 장소 목록.
+  - place_pool와 동일한 구조. id를 통해 식별 가능.
 
-    if intensity <= 30:
-        total_stops = 4
-    elif intensity <= 60:
-        total_stops = 5
-    else:
-        total_stops = 6
+[규칙]
+1. 하루 방문 스팟 수
+   - intensity <= 30: 하루 4곳
+   - 30 < intensity <= 60: 하루 5곳
+   - intensity > 60: 하루 6곳
 
-    # 2) tag_plan에서 MAIN_TAGS만 골라서 weight 가져오기
-    items: List[Dict] = []
-    for item in tag_plan:
-        if not isinstance(item, dict):
-            continue
-        tag = item.get("tag") or item.get("theme")
-        weight = item.get("weight", 0)
-        if tag in MAIN_TAGS:
-            items.append({"tag": tag, "weight": float(weight)})
+2. 테마 비율
+   - "음식점", "카페", "쇼핑" 세 가지를 MAIN TAG로 본다.
+   - tag_plan의 weight를 사용해 하루 스팟 중 이 세 테마 비율을 최대한 맞춘다.
+   - tag_plan이 없거나 weight 합이 0이면 기본 비율은 음식점:0.4, 카페:0.3, 쇼핑:0.3 으로 가정한다.
+   - "술집", "맛집" theme는 "음식점"과 동일한 계열로 취급해도 좋다.
 
-    # 아무 것도 없으면 기본값
-    if not items:
-        items = [
-            {"tag": "음식점", "weight": 0.4},
-            {"tag": "카페",   "weight": 0.3},
-            {"tag": "쇼핑",   "weight": 0.3},
-        ]
+3. selected_main_places 사용
+   - 가능한 한 하루에 하나씩 분배하되, 장소가 모자라면 일부 날은 없어도 된다.
+   - 이미 main_place가 포함된 날에도, 나머지 스팟은 위의 테마 비율을 유지하려고 노력한다.
+   - 같은 장소를 여러 날에 넣지 않는다.
 
-    # weight 정규화
-    total_w = sum(x["weight"] for x in items)
-    if total_w <= 0:
-        for x in items:
-            x["weight"] = 1.0
-        total_w = float(len(items))
-    for x in items:
-        x["weight"] /= total_w
+4. 동선 구성
+   - 같은 테마가 연속해서 너무 많이 나오지 않도록 섞는다. (예: 음식점-음식점-음식점-카페 보다는 음식점-카페-음식점 형태를 선호)
+   - 주소(대략적인 동/구 정도)를 참고하여, 한 날 안에서는 가능한 한 비슷한 지역끼리 묶는다.
+   - 단, 정확한 거리 계산은 불가능하므로, 텍스트 주소 수준에서 상식적으로 판단한다.
 
-    # 3) weight * total_stops 로 개수 배분 (반올림)
-    counts: Dict[str, int] = {}
-    for i, x in enumerate(items):
-        raw = x["weight"] * total_stops
-        c = int(round(raw))
-        # 최소 1개는 보장 (제일 큰 weight 하나만)
-        if c == 0 and i == 0:
-            c = 1
-        counts[x["tag"]] = c
+5. 출력 형식
+   - JSON 형식의 객체 하나만 출력한다. 다른 설명 문장은 쓰지 않는다.
+   - 최상위 키는 "routes" 이고, 각 원소는 아래 형태이다.
 
-    # 4) 총합이 total_stops랑 안 맞으면 조정
-    curr_sum = sum(counts.values())
-    # 너무 많으면 큰 weight부터 줄이기
-    while curr_sum > total_stops:
-        # weight 높은 순으로 줄여 나감
-        # items는 weight 내림차순으로 정렬해서 사용
-        items_sorted = sorted(items, key=lambda x: x["weight"], reverse=True)
-        for x in items_sorted:
-            t = x["tag"]
-            if counts[t] > 0 and curr_sum > total_stops:
-                counts[t] -= 1
-                curr_sum -= 1
-    # 너무 적으면 큰 weight부터 늘리기
-    while curr_sum < total_stops:
-        items_sorted = sorted(items, key=lambda x: x["weight"], reverse=True)
-        for x in items_sorted:
-            if curr_sum >= total_stops:
-                break
-            t = x["tag"]
-            counts[t] = counts.get(t, 0) + 1
-            curr_sum += 1
+{
+  "routes": [
+    {
+      "day": 1,
+      "schedule": [
+        {
+          "order": 1,
+          "place_id": 10
+        },
+        {
+          "order": 2,
+          "place_id": 5
+        }
+      ]
+    },
+    ...
+  ]
+}
 
-    return counts  # 예: {"음식점":2, "카페":1, "쇼핑":2}
-
-
-def _build_day_sequence(counts: Dict[str, int]) -> List[str]:
-    """
-    예: {"음식점":2, "카페":1, "쇼핑":2} -> ["음식점","쇼핑","카페","음식점","쇼핑"]
-    - 가능한 한 같은 테마가 연속되지 않게 구성
-    """
-    seq: List[str] = []
-    # 남은 개수 복사
-    remain = counts.copy()
-
-    last_tag: Optional[str] = None
-
-    while sum(remain.values()) > 0:
-        # 아직 남아 있는 태그들 중에서
-        # 1순위: last_tag와 다르고, 남은 개수가 많은 것
-        candidates = [
-            (tag, c) for tag, c in remain.items()
-            if c > 0 and tag != last_tag
-        ]
-        if not candidates:
-            # 어쩔 수 없이 같은 태그 연속 허용
-            candidates = [(tag, c) for tag, c in remain.items() if c > 0]
-            if not candidates:
-                break
-
-        # 남은 개수가 많은 순으로 정렬해서 선택
-        candidates.sort(key=lambda x: x[1], reverse=True)
-        chosen_tag = candidates[0][0]
-
-        seq.append(chosen_tag)
-        remain[chosen_tag] -= 1
-        last_tag = chosen_tag
-
-    return seq
-
+- order는 1부터 시작하는 방문 순서이다.
+- place_id는 place_pool 안의 "id" 값을 사용한다.
+- duration 일수만큼 day=1..duration 을 모두 포함하려고 시도한다.
+'''
 
 def agent5_route_node(state: AgentState) -> AgentState:
-    """
-    새 버전:
-    - 하루를 time-slot(오전/점심/오후)으로 나누지 않고
-      '스팟 시퀀스'로만 구성.
-    - 예: 식당2, 카페1, 쇼핑2 → [식당,쇼핑,카페,식당,쇼핑] 순서로
-      place_pool에서 실제 장소를 뽑아서 채운다.
-    """
     prefs = state["prefs"]
     tag_plan = state.get("tag_plan") or []
-    place_pool = state["place_pool"]
-    selected_main_places = state.get("selected_main_places") or []
+    place_pool_raw = state["place_pool"]
+    selected_main_places_raw = state.get("selected_main_places") or []
 
-    intensity = prefs.intensity or 50
-    duration = prefs.duration or 1
-
-    # 1) place_pool을 theme 기준으로 버킷화
-    #    (theme 예: "음식점", "카페", "쇼핑", "술집" 등)
-    buckets: Dict[str, List[Dict]] = {}
-    for p in place_pool:
+    # place_pool에 id가 없다면 인덱스로라도 만들어두기
+    place_pool: List[Dict] = []
+    for idx, p in enumerate(place_pool_raw):
         d = _place_dict(p)
-        theme = d.get("theme") or "기타"
-        buckets.setdefault(theme, []).append(d)
+        if "id" not in d:
+            d["id"] = idx  # 임시 id
+        place_pool.append(d)
 
-    # "술집"도 일단 음식점 계열로 같이 쓰고 싶다면 여기서 매핑 가능
-    def map_theme_to_tag(theme: str) -> str:
-        if theme in ["술집", "맛집"]:
-            return "음식점"
-        return theme
+    selected_main_places: List[Dict] = []
+    for p in selected_main_places_raw:
+        d = _place_dict(p)
+        # id가 있으면 그대로, 없으면 위에서 만든 규칙을 맞춰줘야 함
+        if "id" not in d:
+            # place_pool 중 name+address 같은 걸로 찾아서 id 매칭해도 됨
+            d["id"] = next(
+                (pp["id"] for pp in place_pool 
+                 if pp.get("name") == d.get("name")),
+                None
+            )
+        selected_main_places.append(d)
 
-    # 2) 하루에 각 태그(음식점/카페/쇼핑) 몇 개씩 갈지 계산
-    base_counts = _build_theme_counts_per_day(tag_plan, intensity)
-    # 예: {"음식점":2, "카페":1, "쇼핑":2}
+    duration = prefs.duration or 1
+    intensity = prefs.intensity or 50
 
-    routes: List[Dict] = []
-    anchors: List[Dict] = [_place_dict(p) for p in selected_main_places]
+    llm_input = {
+        "prefs": {
+            "intensity": intensity,
+            "duration": duration,
+        },
+        "tag_plan": tag_plan,
+        "place_pool": place_pool,
+        "selected_main_places": selected_main_places,
+    }
 
-    anchor_idx = 0
+    resp = client.chat.completions.create(
+        model="gpt-4.1-mini",  # 쓰는 모델로 변경
+        response_format={"type": "json_object"},
+        messages=[
+            {"role": "system", "content": ROUTE_SYSTEM_PROMPT},
+            {"role": "user", "content": json.dumps(llm_input, ensure_ascii=False)},
+        ],
+    )
 
-    for day in range(1, duration + 1):
-        # 2-1) 이 날 사용할 counts 복사
-        day_counts = base_counts.copy()
+    content = resp.choices[0].message.content
+    try:
+        data = json.loads(content)
+    except json.JSONDecodeError:
+        # 혹시 망하면 최소한의 fallback (그냥 첫 몇 개씩 자르기 등)
+        # 여기서는 state 그대로 리턴하거나, 아주 단순 로직을 넣을 수 있음
+        return state
 
-        # 2-2) 메인 앵커(선택한 장소)가 있으면 먼저 한 개 박아두기 (보너스 느낌)
-        day_places: List[Dict] = []
-        if anchor_idx < len(anchors):
-            anchor = anchors[anchor_idx]
-            anchor_idx += 1
-            day_places.append(anchor)
-            # 앵커의 theme를 하나 소모했다고 보고 counts에서 1 깎을 수도 있고,
-            # "앵커는 보너스"로 두고 counts는 그대로 둘 수도 있음.
-            # 여기서는 보너스 취급 (깎지 않음).
+    routes_out = []
+    for day_info in data.get("routes", []):
+        day_num = day_info.get("day")
+        schedule_out = []
+        for s in day_info.get("schedule", []):
+            place_id = s.get("place_id")
+            order = s.get("order", 0)
 
-        # 2-3) 이 날의 테마 시퀀스 생성 (ex: ["음식점","쇼핑","카페","음식점","쇼핑"])
-        seq = _build_day_sequence(day_counts)
+            # id로 place 찾기
+            pl = next((p for p in place_pool if p["id"] == place_id), None)
+            if pl is None:
+                continue
 
-        # 2-4) 시퀀스대로 각 theme에서 place 하나씩 뽑기
-        for tag in seq:
-            # tag("음식점")에 대응하는 theme 버킷에서 꺼내기
-            # theme들을 tag 기준으로 매핑
-            # ex) theme "술집" -> tag "음식점"
-            # 우선 순위: theme가 정확히 tag인 것 먼저, 그다음 alias
-            # (간단 버전: tag와 같은 theme만 사용)
-            picked: Optional[Dict] = None
-
-            # ① theme == tag 인 버킷
-            exact_bucket = buckets.get(tag, [])
-            if exact_bucket:
-                picked = exact_bucket.pop(0)
-            else:
-                # ② alias (술집 -> 음식점 등)에서 찾아보고 싶으면 여기 확장
-                # 간단히 모든 버킷을 뒤져서 map_theme_to_tag(theme) == tag 인 것 찾기
-                for theme, b in buckets.items():
-                    if not b:
-                        continue
-                    if map_theme_to_tag(theme) == tag:
-                        picked = b.pop(0)
-                        break
-
-            if picked:
-                # 앵커 중복 방지
-                if day_places and any(
-                    (p.get("name") == picked.get("name") and 
-                     (p.get("road_address") or p.get("address")) == (picked.get("road_address") or picked.get("address")))
-                    for p in day_places
-                ):
-                    continue
-                day_places.append(picked)
-
-        # 2-5) 이 날의 스팟들을 '#1, #2, ...' 순서로 schedule에 넣기
-        schedule = []
-        for idx, pl in enumerate(day_places, start=1):
-            schedule.append({
-                "order": idx,   # 번호
+            schedule_out.append({
+                "order": order,
                 "place": pl,
             })
 
-        routes.append({
-            "day": day,
-            "schedule": schedule,
-        })
+        if schedule_out:
+            # order 기준으로 정렬 보정
+            schedule_out.sort(key=lambda x: x["order"])
+            routes_out.append({
+                "day": day_num,
+                "schedule": schedule_out,
+            })
 
-    state["routes"] = routes
+    state["routes"] = routes_out
     return state
+
+
+
+
+# # agents/agent5_route.py
+
+# from typing import Any, Dict, List, Optional
+# from state import AgentState
+
+# def _place_dict(p: Any) -> Dict:
+#     if hasattr(p, "model_dump"):
+#         return p.model_dump()
+#     return dict(p)
+
+# # 우리가 비율로 다룰 메인 테마들
+# MAIN_TAGS = ["음식점", "카페", "쇼핑"]
+
+# def _build_theme_counts_per_day(tag_plan: List[Dict], intensity: int) -> Dict[str, int]:
+#     """
+#     tag_plan의 weight 를 이용해
+#     '하루에 각 테마별로 몇 군데 갈지'를 계산.
+#     예: 5스팟/day이면 음식점2, 카페1, 쇼핑2 이런 식.
+#     """
+#     # 1) 하루에 몇 스팟 갈지 intensity로 결정
+#     #    대충: 힐링(<=30): 4, 보통(<=60):5, 빡셈:6
+#     if intensity is None:
+#         intensity = 50
+#     try:
+#         intensity = int(intensity)
+#     except Exception:
+#         intensity = 50
+
+#     if intensity <= 30:
+#         total_stops = 4
+#     elif intensity <= 60:
+#         total_stops = 5
+#     else:
+#         total_stops = 6
+
+#     # 2) tag_plan에서 MAIN_TAGS만 골라서 weight 가져오기
+#     items: List[Dict] = []
+#     for item in tag_plan:
+#         if not isinstance(item, dict):
+#             continue
+#         tag = item.get("tag") or item.get("theme")
+#         weight = item.get("weight", 0)
+#         if tag in MAIN_TAGS:
+#             items.append({"tag": tag, "weight": float(weight)})
+
+#     # 아무 것도 없으면 기본값
+#     if not items:
+#         items = [
+#             {"tag": "음식점", "weight": 0.4},
+#             {"tag": "카페",   "weight": 0.3},
+#             {"tag": "쇼핑",   "weight": 0.3},
+#         ]
+
+#     # weight 정규화
+#     total_w = sum(x["weight"] for x in items)
+#     if total_w <= 0:
+#         for x in items:
+#             x["weight"] = 1.0
+#         total_w = float(len(items))
+#     for x in items:
+#         x["weight"] /= total_w
+
+#     # 3) weight * total_stops 로 개수 배분 (반올림)
+#     counts: Dict[str, int] = {}
+#     for i, x in enumerate(items):
+#         raw = x["weight"] * total_stops
+#         c = int(round(raw))
+#         # 최소 1개는 보장 (제일 큰 weight 하나만)
+#         if c == 0 and i == 0:
+#             c = 1
+#         counts[x["tag"]] = c
+
+#     # 4) 총합이 total_stops랑 안 맞으면 조정
+#     curr_sum = sum(counts.values())
+#     # 너무 많으면 큰 weight부터 줄이기
+#     while curr_sum > total_stops:
+#         # weight 높은 순으로 줄여 나감
+#         # items는 weight 내림차순으로 정렬해서 사용
+#         items_sorted = sorted(items, key=lambda x: x["weight"], reverse=True)
+#         for x in items_sorted:
+#             t = x["tag"]
+#             if counts[t] > 0 and curr_sum > total_stops:
+#                 counts[t] -= 1
+#                 curr_sum -= 1
+#     # 너무 적으면 큰 weight부터 늘리기
+#     while curr_sum < total_stops:
+#         items_sorted = sorted(items, key=lambda x: x["weight"], reverse=True)
+#         for x in items_sorted:
+#             if curr_sum >= total_stops:
+#                 break
+#             t = x["tag"]
+#             counts[t] = counts.get(t, 0) + 1
+#             curr_sum += 1
+
+#     return counts  # 예: {"음식점":2, "카페":1, "쇼핑":2}
+
+
+# def _build_day_sequence(counts: Dict[str, int]) -> List[str]:
+#     """
+#     예: {"음식점":2, "카페":1, "쇼핑":2} -> ["음식점","쇼핑","카페","음식점","쇼핑"]
+#     - 가능한 한 같은 테마가 연속되지 않게 구성
+#     """
+#     seq: List[str] = []
+#     # 남은 개수 복사
+#     remain = counts.copy()
+
+#     last_tag: Optional[str] = None
+
+#     while sum(remain.values()) > 0:
+#         # 아직 남아 있는 태그들 중에서
+#         # 1순위: last_tag와 다르고, 남은 개수가 많은 것
+#         candidates = [
+#             (tag, c) for tag, c in remain.items()
+#             if c > 0 and tag != last_tag
+#         ]
+#         if not candidates:
+#             # 어쩔 수 없이 같은 태그 연속 허용
+#             candidates = [(tag, c) for tag, c in remain.items() if c > 0]
+#             if not candidates:
+#                 break
+
+#         # 남은 개수가 많은 순으로 정렬해서 선택
+#         candidates.sort(key=lambda x: x[1], reverse=True)
+#         chosen_tag = candidates[0][0]
+
+#         seq.append(chosen_tag)
+#         remain[chosen_tag] -= 1
+#         last_tag = chosen_tag
+
+#     return seq
+
+
+# def agent5_route_node(state: AgentState) -> AgentState:
+#     """
+#     새 버전:
+#     - 하루를 time-slot(오전/점심/오후)으로 나누지 않고
+#       '스팟 시퀀스'로만 구성.
+#     - 예: 식당2, 카페1, 쇼핑2 → [식당,쇼핑,카페,식당,쇼핑] 순서로
+#       place_pool에서 실제 장소를 뽑아서 채운다.
+#     """
+#     prefs = state["prefs"]
+#     tag_plan = state.get("tag_plan") or []
+#     place_pool = state["place_pool"]
+#     selected_main_places = state.get("selected_main_places") or []
+
+#     intensity = prefs.intensity or 50
+#     duration = prefs.duration or 1
+
+#     # 1) place_pool을 theme 기준으로 버킷화
+#     #    (theme 예: "음식점", "카페", "쇼핑", "술집" 등)
+#     buckets: Dict[str, List[Dict]] = {}
+#     for p in place_pool:
+#         d = _place_dict(p)
+#         theme = d.get("theme") or "기타"
+#         buckets.setdefault(theme, []).append(d)
+
+#     # "술집"도 일단 음식점 계열로 같이 쓰고 싶다면 여기서 매핑 가능
+#     def map_theme_to_tag(theme: str) -> str:
+#         if theme in ["술집", "맛집"]:
+#             return "음식점"
+#         return theme
+
+#     # 2) 하루에 각 태그(음식점/카페/쇼핑) 몇 개씩 갈지 계산
+#     base_counts = _build_theme_counts_per_day(tag_plan, intensity)
+#     # 예: {"음식점":2, "카페":1, "쇼핑":2}
+
+#     routes: List[Dict] = []
+#     anchors: List[Dict] = [_place_dict(p) for p in selected_main_places]
+
+#     anchor_idx = 0
+
+#     for day in range(1, duration + 1):
+#         # 2-1) 이 날 사용할 counts 복사
+#         day_counts = base_counts.copy()
+
+#         # 2-2) 메인 앵커(선택한 장소)가 있으면 먼저 한 개 박아두기 (보너스 느낌)
+#         day_places: List[Dict] = []
+#         if anchor_idx < len(anchors):
+#             anchor = anchors[anchor_idx]
+#             anchor_idx += 1
+#             day_places.append(anchor)
+#             # 앵커의 theme를 하나 소모했다고 보고 counts에서 1 깎을 수도 있고,
+#             # "앵커는 보너스"로 두고 counts는 그대로 둘 수도 있음.
+#             # 여기서는 보너스 취급 (깎지 않음).
+
+#         # 2-3) 이 날의 테마 시퀀스 생성 (ex: ["음식점","쇼핑","카페","음식점","쇼핑"])
+#         seq = _build_day_sequence(day_counts)
+
+#         # 2-4) 시퀀스대로 각 theme에서 place 하나씩 뽑기
+#         for tag in seq:
+#             # tag("음식점")에 대응하는 theme 버킷에서 꺼내기
+#             # theme들을 tag 기준으로 매핑
+#             # ex) theme "술집" -> tag "음식점"
+#             # 우선 순위: theme가 정확히 tag인 것 먼저, 그다음 alias
+#             # (간단 버전: tag와 같은 theme만 사용)
+#             picked: Optional[Dict] = None
+
+#             # ① theme == tag 인 버킷
+#             exact_bucket = buckets.get(tag, [])
+#             if exact_bucket:
+#                 picked = exact_bucket.pop(0)
+#             else:
+#                 # ② alias (술집 -> 음식점 등)에서 찾아보고 싶으면 여기 확장
+#                 # 간단히 모든 버킷을 뒤져서 map_theme_to_tag(theme) == tag 인 것 찾기
+#                 for theme, b in buckets.items():
+#                     if not b:
+#                         continue
+#                     if map_theme_to_tag(theme) == tag:
+#                         picked = b.pop(0)
+#                         break
+
+#             if picked:
+#                 # 앵커 중복 방지
+#                 if day_places and any(
+#                     (p.get("name") == picked.get("name") and 
+#                      (p.get("road_address") or p.get("address")) == (picked.get("road_address") or picked.get("address")))
+#                     for p in day_places
+#                 ):
+#                     continue
+#                 day_places.append(picked)
+
+#         # 2-5) 이 날의 스팟들을 '#1, #2, ...' 순서로 schedule에 넣기
+#         schedule = []
+#         for idx, pl in enumerate(day_places, start=1):
+#             schedule.append({
+#                 "order": idx,   # 번호
+#                 "place": pl,
+#             })
+
+#         routes.append({
+#             "day": day,
+#             "schedule": schedule,
+#         })
+
+#     state["routes"] = routes
+#     return state
+
+
+
+
 
 
 # from typing import Any, Dict, List, Optional
