@@ -3,15 +3,17 @@ from typing import Any, Dict, List
 from state import AgentState
 from openai import OpenAI
 
-client = OpenAI()  # 이미 어딘가에 있다면 재사용
+client = OpenAI() 
 
 def _place_dict(p: Any) -> Dict:
     if hasattr(p, "model_dump"):
-        return p.model_dump()
+        return p.model_dump() 
     return dict(p)
 
 ROUTE_SYSTEM_PROMPT ='''
 당신은 사용자의 취향과 장소 목록을 바탕으로 '여행 동선'을 짜는 전문가입니다.
+### agent4에서 이제 selected main place 이 변수는 없애버릴거고 agent4에서 제공한 3개의 후보에서 사용자가 마음에 드는 것을 
+입력하면 그걸 반영해서 루트를 짜주면 돼.
 
 [입력 설명]
 - prefs: 사용자의 취향 설정. 
@@ -116,7 +118,7 @@ def agent5_route_node(state: AgentState) -> AgentState:
     }
 
     resp = client.chat.completions.create(
-        model="gpt-4.1-mini",  # 쓰는 모델로 변경
+        model="gpt-4.1-mini", 
         response_format={"type": "json_object"},
         messages=[
             {"role": "system", "content": ROUTE_SYSTEM_PROMPT},
