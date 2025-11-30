@@ -129,6 +129,7 @@ class CandidatePlace(BaseModel):
     weight: float=Field(description="중요도 (Agent 2에서 받음)")       
     keyword: str  =Field(description="검색 키워드")     
 
+
 class AgentState(TypedDict):
 
     next_step: Literal["planner", "suggester", "path_finder", "general_chat"]

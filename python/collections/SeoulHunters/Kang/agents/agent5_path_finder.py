@@ -1,113 +1,132 @@
 import json
-from typing import Any, Dict, List, Optional
-from state import AgentState, CandidatePlace
+import math
+from typing import List, Optional
 from langchain_openai import ChatOpenAI
 from langchain_core.messages import SystemMessage, HumanMessage
 from pydantic import BaseModel, Field
 
-class RoutesOutput(BaseModel):
-    selected_main_places: Optional[List[CandidatePlace]] = Field(
-        description="여행 경로에 포함되는 장소"
+# state.py에서 정의한 클래스들 import
+from state import AgentState, CandidatePlace
+
+# [1] LLM 출력용 스키마 (가볍게 이름만 리턴받음)
+class RoutePlanOutput(BaseModel):
+    ordered_place_names: List[str] = Field(
+        description="최적의 동선 순서대로 정렬된 장소 이름 리스트 (사용자 선택 포함 + 부족하면 Pool에서 추가)"
     )
     routes_text: str = Field(
-        description="여행 경로"
+        description="해당 경로에 대한 매력적인 설명 (마크다운 형식)"
     )
 
+# [2] 거리 계산 헬퍼 (단순 유클리드 거리, 정렬용)
+def calc_dist(p1, p2):
+    return math.sqrt((p1.x - p2.x)**2 + (p1.y - p2.y)**2)
+
 def agent5_route_node(state: AgentState) -> AgentState:
+    print("\n🚗 --- [Agent 5] 최종 경로 생성 및 최적화 ---")
+    
     messages = state["messages"]
     last_user_msg = messages[-1].content
 
-    # LLM 설정
-    llm = ChatOpenAI(model="gpt-4.1-mini", temperature=0)
-    
-    # 여기에서 진행 할 겁니다.
-    # LLM 설정
-    structured_llm = llm.with_structured_output(RoutesOutput)
-    
-    
+    # 1. 데이터 준비
     prefs = state["preferences"]
-    # strategy: 테마 비율 정보 (tag_plan 역할)
-    tag_plan = state["strategy"] or []
-    # candidates: 실제 방문 후보 장소 리스트
-    place_pool = state.get("candidates") or []
-    main_place_candidates = state["main_place_candidates"] or []
-    selected_main_places = state.get("selected_main_places") or []
+    place_pool = state.get("candidates") or []           # 전체 수집 데이터 (Agent 3)
+    main_candidates = state.get("main_place_candidates") or [] # 제안했던 후보 (Agent 4)
+    
+    # LLM에게 보여줄 데이터 경량화 (토큰 절약 & 집중력 향상)
+    # 전체 Pool을 다 보여주면 너무 많으니, Weight 상위 + 메인 후보만 추림
+    combined_pool = {p.place_name: p for p in place_pool + main_candidates} # 중복제거용 Dict
+    
+    # LLM에게 넘길 텍스트 요약본 생성
+    candidates_txt = ""
+    for name, p in list(combined_pool.items()): 
+        candidates_txt += f"- {name} ({p.category}, 키워드:{p.keyword}, 좌표:{p.y},{p.x})\n"
 
-    ROUTE_SYSTEM_PROMPT = f"""
-    당신은 사용자의 취향과 장소 목록을 바탕으로 '여행 동선'을 짜는 전문가입니다.
+    # 2. 목표 방문 장소 개수 계산 (Intensity 기반)
+    intensity = prefs.intensity or 50
+    if intensity <= 30: target_count = 3
+    elif intensity <= 60: target_count = 4
+    else: target_count = 5
+    
+    # Duration 고려 (1일 기준이므로 곱하기 1, 만약 N일이면 늘어남)
+    # 여기서는 '하루 코스'를 짜는 것으로 가정
+    
+    # 3. LLM 설정
+    llm = ChatOpenAI(model="gpt-4.1", temperature=0) # gpt-4o 추천 (복잡한 추론 필요)
+    structured_llm = llm.with_structured_output(RoutePlanOutput)
 
-    이전 단계(agent4)에서 사용자는 추천 후보 중 마음에 드는 장소를 선택했습니다.
-    그 선택 결과는 selected_main_places에 담겨 전달됩니다.
-    - 선택이 1개일 수도, 여러 개일 수도, 아예 없을 수도 있습니다.
-    - 선택이 없더라도 전체 여행 동선을 자연스럽게 만들어야 합니다.
+    # 4. 프롬프트 작성
+    system_prompt = f"""
+    당신은 여행 동선 설계 전문가입니다.
+    사용자의 선택과 전체 후보군을 조합하여 **가장 효율적이고 매력적인 하루 여행 코스**를 짜세요.
 
-    아래 입력 정보를 참고하여, 한국어로 사람이 읽기 좋은 여행 일정을 설계하세요.
+    [사용자 프로필]
+    - 테마: {prefs.themes}
+    - 강도: {intensity} (목표 방문지 수: 약 {target_count}곳)
+    - 요청사항: "{prefs.additional_notes}"
 
-    [사용자 선호도]
-    {json.dumps(prefs.model_dump(), indent=2, ensure_ascii=False)}
+    [사용자가 보고 있던 추천 후보 (Agent 4 제안)]
+    {", ".join([p.place_name for p in main_candidates])}
 
-    [테마 비율 정보]
-    {tag_plan}
+    [전체 이용 가능한 장소 풀 (Pool)]
+    {candidates_txt}
 
-    [추천 장소 리스트]
-    {main_place_candidates}
+    [사용자 입력 (선택 사항)]
+    "{last_user_msg}"
 
-    [후보 장소 리스트]
-    {place_pool}
-
-    [규칙]
-    1. 사용자의 입력에 대해서 추천 장소 리스트와 대조해, 적절한 장소를 반드시 포함한다.
-
-    2. 하루 방문 스팟 수
-      - intensity <= 30: 하루 4곳
-      - 30 < intensity <= 60: 하루 5곳
-      - intensity > 60: 하루 6곳
-
-    3. 테마 비율
-      - "음식점", "카페", "쇼핑" 세 가지를 MAIN TAG로 본다.
-      - 테마 비율 정보의 weight 비율을 참고하여, 하루 스팟 구성에서 이 비율을 최대한 맞춘다.
-      - 테마 비율 정보가 없거나 weight 합이 0이면 기본 비율은
-        - 음식점 0.4, 카페 0.3, 쇼핑 0.3 으로 가정한다.
-      - "술집", "맛집" theme는 "음식점"과 비슷한 계열로 취급해도 좋다.
-
-    4. 동선 구성
-      - "음식점" 테마가 연속해서 너무 많이 나오지 않도록 섞는다.
-        예: 음식점-카페-음식점-쇼핑 처럼 구성하는 것을 선호.
-      - 주소(대략적인 동/구 정도)를 참고하여, 한 날 안에서는 가능한 한 비슷한 지역끼리 묶는다.
-      - x, y (경도와 위도)도 참고하여, 한 날 안에서는 가능한 한 비슷한 지역끼리 묶는다.
-      - 정확한 거리 계산은 하지 말고, 텍스트 주소 수준에서 상식적으로 판단한다.
-
-    [출력 형식]
-    - selected_main_places: 여행 경로에 포함되는 장소들을 구조에 맞춰 작성한다.
-    - routes_text: 포함되는 장소들을 날짜에 맞게 적절히 분배한다.
-
-    routes_text 예시 형식:
-
-    Day 1
-    1. 장소이름 (테마, 대략 위치: ○○구 ○○동)  - 간단 설명 및 동선 이유
-    2. 장소이름 (테마, 대략 위치: ○○구 ○○동)
-    3. ...
-
-    Day 2
-    1. 장소이름 (테마, 대략 위치: ○○구 ○○동)
-    2. ...
-
-    - 각 Day에는 방문 순서대로 번호를 매긴다.
-    - 가능한 한 duration 일수만큼 Day 1 ~ Day N을 모두 채우려고 시도한다.
-    - selected_main_places에 해당하는 장소가 일정에 포함되면,
-      해당 줄에 "(사용자 선택 스팟)"이라고 명시해 주면 좋다.
-
-    반드시 위 형식을 따르되, 사람 입장에서 읽기 편한 한국어 설명으로 일정을 작성하세요.
+    [동선 설계 규칙]
+    1. **사용자 선택 반영**: 사용자 입력에서 특정 장소를 선택했다면, 그 장소를 **반드시 포함**하고 **우선순위(Anchor)**로 두세요.
+    2. **빈자리 채우기**: 선택된 장소가 목표({target_count}개)보다 적다면, '장소 풀'에서 동선(좌표)과 테마 밸런스를 고려해 추가하세요.
+       - 동선 효율성: 선택된 장소와 좌표가 가까운 곳 위주로 선택.
+       - 테마 밸런스: 식당 -> 카페 -> 관광지 -> 쇼핑 순서 등 지루하지 않게 배치.
+    3. **출력**: 방문 순서대로 장소의 **'정확한 이름'**만 리스트에 담으세요.
     """
-    
-    result = structured_llm.invoke([
-        SystemMessage(content=ROUTE_SYSTEM_PROMPT),
-        HumanMessage(content = last_user_msg)
-    ])
 
-    print("===agent5_log===")
-    print(result)
+    # 5. 실행
+    try:
+        result = structured_llm.invoke([SystemMessage(content=system_prompt)])
+    except Exception as e:
+        print(f"Error in Agent 5: {e}")
+        return state
+
+    # 6. [핵심] LLM이 뱉은 이름(String)을 실제 객체(CandidatePlace)로 복원
+    # 이 과정이 있어야 지도에 핀이 찍힙니다.
+    final_route_objects = []
     
-    state["selected_main_places"] = result.selected_main_places
-    state["routes_text"] = result.routes_text
-    return state
+    print(f"   📍 AI 제안 경로: {result.ordered_place_names}")
+    
+    for name in result.ordered_place_names:
+        # 이름이 유사한 객체를 찾음 (완전 일치 우선, 없으면 포함 여부)
+        found = None
+        
+        # 1차 시도: 완전 일치
+        if name in combined_pool:
+            found = combined_pool[name]
+        
+        # 2차 시도: 부분 일치 (LLM이 이름을 약간 줄여서 말했을 경우 대비)
+        if not found:
+            for real_name, p in combined_pool.items():
+                if name in real_name or real_name in name:
+                    found = p
+                    break
+        
+        if found:
+            final_route_objects.append(found)
+        else:
+            print(f"   ⚠️ 경고: '{name}'에 해당하는 장소 객체를 찾을 수 없습니다.")
+
+    # 7. State 업데이트
+    # selected_main_places에 '순서대로 정렬된 실제 객체 리스트'를 넣습니다.
+    # main.py의 create_map_html(is_route=True)가 이걸 보고 선을 그립니다.
+    
+    print(f"   ✅ 최종 경로 확정: {len(final_route_objects)}개 장소")
+    
+    # 기존 값을 덮어씁니다 (Agent 5의 결과가 최종 권위)
+    state["selected_main_places"] = final_route_objects
+    state['routes_text'] = result.routes_text
+    # 설명 텍스트는 별도 필드나 messages에 저장 가능하지만, 여기선 로그로만 확인
+    # (필요하다면 state에 'final_itinerary_text' 같은 필드 추가)
+    
+    return {
+        "selected_main_places": final_route_objects,
+        # "messages": [AIMessage(content=result.routes_text)] # 필요시 주석 해제
+    }

@@ -46,51 +46,72 @@ UI_LABELS = {
 }
 
 
-def create_map_html(candidates):
-    """후보 장소 리스트를 받아 Folium 지도를 생성하고 HTML 문자열로 반환"""
-    if not candidates:
-        return "<div style='text-align:center'>장소가 없습니다.</div>"
+def create_map_html(places, is_route=False):
+    """
+    places: 장소 리스트
+    is_route: True면 순서대로 선을 연결함 (Agent 5 결과용)
+    """
+    if not places:
+        return "<div style='text-align:center; padding:20px; color:gray;'>지도에 표시할 데이터가 없습니다.</div>"
     
-    # 1. 지도 중심 좌표 계산 (평균값)
-    avg_lat = sum([c.y for c in candidates]) / len(candidates)
-    avg_lng = sum([c.x for c in candidates]) / len(candidates)
-    
-    # 2. 지도 생성 (OpenStreetMap 사용)
-    m = folium.Map(location=[avg_lat, avg_lng], zoom_start=13)
-    
-    # 3. 마커 추가
-    for i, c in enumerate(candidates, 1):
-        # 팝업 내용 (이름 + 카테고리)
-        popup_html = f"<b>{i}. {c.place_name}</b><br>{c.category}<br><a href='{c.place_url}' target='_blank'>상세보기</a>"
-        
-        folium.Marker(
-            [c.y, c.x],
-            popup=popup_html,
-            tooltip=f"{i}. {c.place_name}"
-        ).add_to(m)
-        
-    # HTML 문자열로 반환
-    return m._repr_html_()
-
-# [추가된 지도 생성 함수]
-def create_map_html(candidates):
-    if not candidates: return "<div>지도를 표시할 장소가 없습니다.</div>"
     try:
-        lats = [c.y for c in candidates if c.y > 0]
-        lngs = [c.x for c in candidates if c.x > 0]
-        if not lats: return "<div>유효한 좌표가 없습니다.</div>"
+        # 좌표 유효성 검사 (0,0 제외)
+        valid_places = [p for p in places if p.x > 0 and p.y > 0]
         
-        avg_lat, avg_lng = sum(lats)/len(lats), sum(lngs)/len(lngs)
-        m = folium.Map(location=[avg_lat, avg_lng], zoom_start=14)
+        if not valid_places:
+            return "<div>유효한 좌표가 없습니다.</div>"
         
-        for i, c in enumerate(candidates, 1):
-            popup_html = f"<div style='width:150px'><b>{i}. {c.place_name}</b><br>{c.category}<br><a href='{c.place_url}' target='_blank'>Link</a></div>"
+        # 중심 좌표 계산
+        avg_lat = sum(p.y for p in valid_places) / len(valid_places)
+        avg_lng = sum(p.x for p in valid_places) / len(valid_places)
+        
+        m = folium.Map(location=[avg_lat, avg_lng], zoom_start=13)
+        
+        # 좌표 리스트 (선 그리기용)
+        route_coords = []
+
+        for i, p in enumerate(valid_places, 1):
+            lat, lng = p.y, p.x
+            route_coords.append((lat, lng))
+            
+            # 마커 색상 (경로 모드일 때: 출발=빨강, 도착=초록, 중간=파랑)
+            if is_route:
+                if i == 1: color = 'red'       # Start
+                elif i == len(valid_places): color = 'green' # End
+                else: color = 'blue'
+            else:
+                color = 'blue' # 일반 제안 모드
+
+            # 팝업 HTML
+            popup_html = (
+                f"<div style='min-width:150px'>"
+                f"<b>{i}. {p.place_name}</b><br>"
+                f"<span style='font-size:12px; color:gray'>{p.category}</span><br>"
+                f"<a href='{p.place_url}' target='_blank' style='text-decoration:none; color:blue;'>kakao map 🔗</a>"
+                f"</div>"
+            )
+            
             folium.Marker(
-                [c.y, c.x], popup=popup_html, tooltip=f"{i}. {c.place_name}"
+                [lat, lng],
+                popup=popup_html,
+                tooltip=f"{i}. {p.place_name}",
+                icon=folium.Icon(color=color, icon='info-sign')
             ).add_to(m)
+
+        # [핵심] 경로 모드일 경우 선 그리기
+        if is_route and len(route_coords) > 1:
+            folium.PolyLine(
+                locations=route_coords,
+                color="blue",
+                weight=5,
+                opacity=0.7,
+                tooltip="추천 이동 경로"
+            ).add_to(m)
+
         return m._repr_html_()
+        
     except Exception as e:
-        return f"<div>지도 생성 중 오류 발생: {e}</div>"
+        return f"<div>Map Error: {str(e)}</div>"
     
 def translate_text(text, target_lang):
     text = str(text)
@@ -255,7 +276,7 @@ def bot_turn(history, thread_id):
             elif node_name == "suggester":
                 main_cands = state_update.get('main_place_candidates', [])
                 # Folium 지도 HTML 생성
-                map_html = create_map_html(main_cands)
+                map_html = create_map_html(main_cands, is_route=False)
                 
                 # Markdown 리스트 생성
                 list_text = []
@@ -277,18 +298,20 @@ def bot_turn(history, thread_id):
                 # Agent5가 만든 동선 텍스트
                 routes_text = state_update.get("routes_text") or accumulated_state.get("routes_text", "")
                 
-                # 선택된 메인 스팟(또는 후보 스팟) 기준으로 지도 다시 그려주기 (선택사항)
-                main_cands = accumulated_state.get("selected_main_places") or accumulated_state.get("main_place_candidates")
-                if main_cands:
-                    map_html = create_map_html(main_cands)
+                # 1. 확정된 경로 데이터 가져오기
+                # (Agent 5가 state['selected_main_places'] 또는 state['final_route']에 저장했다고 가정)
+                final_places = accumulated_state.get('selected_main_places', [])
                 
-                if not routes_text:
-                    kor_log = "🧭 **Agent 5:** 동선 정보를 찾지 못했어요. 다시 한 번 가고 싶은 장소를 말씀해 주세요!"
-                else:
+                if final_places:
+                    # 2. 지도 업데이트 (is_route=True 로 선 그리기!)
+                    map_html = create_map_html(final_places, is_route=True)
+                    
                     kor_log = (
-                        "🧭 **Agent 5:** 선택하신 장소들을 기준으로 아래와 같이 동선을 짜 보았어요.\n\n"
+                        f"\n⬇️\n🚗 **Agent 5:** 경로 생성 완료!\n"
                         f"{routes_text}"
                     )
+                else:
+                    kor_log = "⚠️ 경로를 생성할 장소 데이터가 없습니다."
             
                 
             # --- 번역 및 UI 업데이트 ---
