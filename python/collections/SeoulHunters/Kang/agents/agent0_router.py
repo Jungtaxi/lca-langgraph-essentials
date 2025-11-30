@@ -99,6 +99,7 @@ def router_node(state):
     ])
     
     print(f"   👉 [Router 판단] {decision.next_agent} (이유: {decision.reason})")
+    ai_msg = f"[Router 판단] {decision.next_agent} \n (이유: {decision.reason})"
     
     # AI 메시지는 굳이 저장 안 해도 됨 (State에만 반영)
-    return {"next_step": decision.next_agent}
+    return {"next_step": decision.next_agent, "messages": [AIMessage(content=ai_msg)]}

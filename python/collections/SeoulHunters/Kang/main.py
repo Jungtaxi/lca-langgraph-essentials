@@ -5,7 +5,7 @@ import operator
 from typing import Annotated, List, Optional, TypedDict 
 from langgraph.graph import StateGraph, END
 from langgraph.checkpoint.memory import MemorySaver
-from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_core.messages import HumanMessage, SystemMessage, AIMessage
 from langchain_openai import ChatOpenAI
 
 # 모듈 import
@@ -255,6 +255,7 @@ def bot_turn(history, thread_id):
     accumulated_state = {}
     history.append({"role": "assistant", "content": "🤔 Thinking..."})
     
+    
     detected_language = "Korean"
 
     # [핵심 수정] 초기값을 루프 밖에서 미리 선언해야 에러가 안 납니다!
@@ -269,7 +270,12 @@ def bot_turn(history, thread_id):
 
             # --- 로그 메시지 생성 ---
             kor_log = ""
-            if node_name == "planner":
+            if node_name == "router":
+                messages = state_update['messages']
+                if isinstance(messages[-1], AIMessage):
+                    kor_log = messages[-1].content
+                    
+            elif node_name == "planner":
                 prefs = state_update['preferences']
                 if not prefs.is_complete:
                     kor_log = f"❓ **Agent 1:** {prefs.missing_info_question}"
@@ -356,40 +362,257 @@ def bot_turn(history, thread_id):
     # 최종 상태 한 번 더 yield
     yield history, thread_id, df_p, df_s, map_html
 
-# --- Gradio UI (단순화됨) ---
-with gr.Blocks(title="Seoul Hunters") as demo:
-    tid_state = gr.State("")
-    
-    with gr.Row():
-        gr.Markdown("# Seoul Hunters")
-    
-    with gr.Row():
-        with gr.Column(scale=1):
-            chatbot = gr.Chatbot(height=600)
-            msg = gr.Textbox(label="Input", placeholder="여행 계획을 이야기해주세요...")
-        
-        with gr.Column(scale=1):
-            with gr.Tabs():
-                with gr.Tab("1. Planner"):
-                    df_pref_ui = gr.Dataframe(headers=["항목", "내용"], wrap=True)
-                with gr.Tab("2. Strategy"):
-                    df_strat_ui = gr.Dataframe(headers=["카테고리", "키워드"], wrap=True)
-                
-                # [수정] 3번 탭을 '지도 & 제안'으로 통합
-                with gr.Tab("3. Map & Suggestion"):
-                    # 지도 표시용 HTML 컴포넌트
-                    map_output = gr.HTML(label="Interactive Map")
+# --- Gradio 테마 & 커스텀 스타일 ---
+custom_css = """
+/* 전체 배경 */
+.gradio-container {
+    background: radial-gradient(circle at top left, #f5f7ff, #ffffff);
+}
 
+/* 메인 카드 느낌 */
+#main-card {
+    background-color: white;
+    border-radius: 18px;
+    box-shadow: 0 12px 25px rgba(15, 23, 42, 0.12);
+    padding: 20px 24px;
+}
+
+/* 헤더 타이틀 */
+#app-title h1 {
+    font-size: 2rem;
+    font-weight: 800;
+    margin-bottom: 0.3rem;
+}
+#app-title p {
+    font-size: 0.95rem;
+    color: #6b7280;
+}
+
+/* Chatbot 영역 */
+#chat-column {
+    border-right: 1px solid #e5e7eb;
+}
+
+/* 탭 제목 강조 */
+button.svelte-1ipelgc {  /* Gradio 탭 버튼 공통 클래스 (구버전 기준) */
+    font-weight: 600;
+}
+
+/* 데이터프레임 폰트 줄이기 */
+table {
+    font-size: 0.85rem;
+}
+
+/* 지도 영역 고정 높이 */
+#map-box {
+    max-height: 420px;
+    overflow: hidden;
+    border-radius: 16px;
+    box-shadow: 0 8px 18px rgba(15, 23, 42, 0.1);
+}
+
+/* 입력 박스 스타일 */
+#input-box textarea {
+    border-radius: 12px;
+}
+
+/* 전송 버튼 느낌 */
+#send-btn button {
+    border-radius: 999px;
+    font-weight: 600;
+}
+
+/* ---- Seoul Hunters Logo ---- */
+
+/* 프레임 삭제 + 투명 처리 */
+#logo-img,
+#logo-img .image-container,
+#logo-img > div {
+    background: transparent !important;
+    border: none !important;
+    box-shadow: none !important;
+}
+
+/* 확대/다운로드 버튼 없애기 */
+#logo-img button,
+#logo-img .toolbar {
+    display: none !important;
+}
+
+/* 로고 이미지 스타일 (최종 적용) */
+#logo-img img {
+    width: 140px; /* 사이즈 원하는대로 조절 가능 */
+    height: auto;
+    display: block;
+    margin: 10px auto 16px auto; /* 가운데 정렬 + 여백 */
+    object-fit: contain;
+}
+
+
+"""
+
+# --- Gradio UI (리디자인 버전) ---
+with gr.Blocks(title="Seoul Hunters") as demo:
+    # CSS 주입
+    gr.HTML(f"<style>{custom_css}</style>")
+    tid_state = gr.State("")
+
+    # ▶ 헤더 영역
+        # ▶ 헤더 영역
+    with gr.Row():
+        # 왼쪽: 로고
+        with gr.Column(scale=1):
+            gr.Image(
+                value="logo.png",  # 로고 파일명
+                show_label=False,
+                height=120,
+                width=120,
+            )
+
+        # 오른쪽: 타이틀 & 설명
+        with gr.Column(scale=4, elem_id="app-title"):
+            gr.Markdown(
+                """
+                # Seoul Hunters
+                ### AI가 동선까지 챙겨주는 **서울 여행 플래너**
+                아래 채팅창에 원하는 여행 스타일을 편하게 말해 주세요.<br>
+                예) *"친구랑 이태원 당일치기, 맛집 위주로 걸어 다니고 싶어"*
+                """,
+                elem_id="app-title"
+            )
+
+    # with gr.Row():
+    #     # 왼쪽: 로고 (Image 사용)
+    #     with gr.Column(scale=1):
+    #         gr.Image(
+    #             value="logo.png",          # main.py와 같은 폴더에 logo.png
+    #             show_label=False,
+    #             interactive=False,
+    #             elem_id="logo-img"
+    #         )
+
+    #     # 오른쪽: 타이틀 & 설명
+    #     with gr.Column(scale=4, elem_id="app-title"):
+    #         gr.Markdown(
+    #             """
+    #             # Seoul Hunters
+    #             ### AI가 동선까지 챙겨주는 **서울 여행 플래너**
+    #             아래 채팅창에 원하는 여행 스타일을 편하게 말해 주세요.  
+    #             예) *"친구랑 이태원 당일치기, 맛집 위주로 걸어 다니고 싶어"*
+    #             """,
+    #             elem_id="app-title"
+    #         )
+
+    # ▶ 메인 카드 레이아웃
+    with gr.Row(elem_id="main-card"):
+        # 🔹 왼쪽: 채팅 영역
+        with gr.Column(scale=3, elem_id="chat-column"):
+            chatbot = gr.Chatbot(
+                height=520,
+                label="Chat with Seoul Hunters",
+                show_label=False
+            )
+
+            msg = gr.Textbox(
+                label="",
+                placeholder="여행 계획, 분위기, 가고 싶은 지역 등을 자유롭게 적어주세요 ✨",
+                lines=2,
+                elem_id="input-box"
+            )
+            send_btn = gr.Button("보내기", elem_id="send-btn")
+
+        # 🔹 오른쪽: 요약 / 전략 / 지도
+        with gr.Column(scale=2):
+            with gr.Tabs():
+                with gr.Tab("1. Planner 요약"):
+                    gr.Markdown("여행 기획 정보가 정리되어 표시됩니다.")
+                    df_pref_ui = gr.Dataframe(
+                        headers=["항목", "내용"],
+                        wrap=True,
+                        interactive=False
+                    )
+
+                with gr.Tab("2. Strategy 전략"):
+                    gr.Markdown("여행 카테고리별 전략과 키워드입니다.")
+                    df_strat_ui = gr.Dataframe(
+                        headers=["카테고리", "키워드", "선정 이유"],
+                        wrap=True,
+                        interactive=False
+                    )
+
+                with gr.Tab("3. Map & Suggestion"):
+                    gr.Markdown("추천된 메인 후보들을 지도와 리스트로 함께 볼 수 있어요.")
+
+                    with gr.Column():
+                        map_output = gr.HTML(
+                            label="",
+                            show_label=False,
+                            elem_id="map-box"
+                        )
+
+
+    # ▶ 이벤트 연결
+    # 엔터로 전송
     msg.submit(
-        user_turn, 
-        inputs=[msg, chatbot], 
-        outputs=[msg, chatbot], 
+        user_turn,
+        inputs=[msg, chatbot],
+        outputs=[msg, chatbot],
         queue=False
     ).then(
         bot_turn,
         inputs=[chatbot, tid_state],
-        outputs=[chatbot, tid_state, df_pref_ui, df_strat_ui, map_output] # outputs 순서 주의!
+        outputs=[chatbot, tid_state, df_pref_ui, df_strat_ui, map_output]
+    )
+
+    # 버튼으로 전송
+    send_btn.click(
+        user_turn,
+        inputs=[msg, chatbot],
+        outputs=[msg, chatbot],
+        queue=False
+    ).then(
+        bot_turn,
+        inputs=[chatbot, tid_state],
+        outputs=[chatbot, tid_state, df_pref_ui, df_strat_ui, map_output]
     )
 
 if __name__ == "__main__":
     demo.launch()
+
+# --- Gradio UI (단순화됨) ---
+# with gr.Blocks(title="Seoul Hunters") as demo:
+#     tid_state = gr.State("")
+    
+#     with gr.Row():
+#         gr.Markdown("# Seoul Hunters")
+    
+#     with gr.Row():
+#         with gr.Column(scale=1):
+#             chatbot = gr.Chatbot(height=600)
+#             msg = gr.Textbox(label="Input", placeholder="여행 계획을 이야기해주세요...")
+        
+#         with gr.Column(scale=1):
+#             with gr.Tabs():
+#                 with gr.Tab("1. Planner"):
+#                     df_pref_ui = gr.Dataframe(headers=["항목", "내용"], wrap=True)
+#                 with gr.Tab("2. Strategy"):
+#                     df_strat_ui = gr.Dataframe(headers=["카테고리", "키워드"], wrap=True)
+                
+#                 # [수정] 3번 탭을 '지도 & 제안'으로 통합
+#                 with gr.Tab("3. Map & Suggestion"):
+#                     # 지도 표시용 HTML 컴포넌트
+#                     map_output = gr.HTML(label="Interactive Map")
+
+#     msg.submit(
+#         user_turn, 
+#         inputs=[msg, chatbot], 
+#         outputs=[msg, chatbot], 
+#         queue=False
+#     ).then(
+#         bot_turn,
+#         inputs=[chatbot, tid_state],
+#         outputs=[chatbot, tid_state, df_pref_ui, df_strat_ui, map_output] # outputs 순서 주의!
+#     )
+
+# if __name__ == "__main__":
+#     demo.launch()
