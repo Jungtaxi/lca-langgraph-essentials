@@ -9,7 +9,7 @@ class Satisfied(BaseModel):
     satisfy: bool = Field(description="조건 충족 여부 (True/False)")
 
 def collector_node_kakao(state: AgentState):
-    print("\n🏃 --- [Agent 3] 메인 장소 후보군(Pool) 대량 수집 중 ---")
+    print("\n🏃 --- [Agent 3] 장소 수집 및 검증중 KAKAO ---")
     
     strategy = state['strategy']
     preferences = state.get('preferences')
@@ -95,6 +95,6 @@ def collector_node_kakao(state: AgentState):
                 )
                 final_candidates.append(place_obj)
             
-    print(f"✅ 총 {len(final_candidates)}개의 유니크한 장소 후보(Pool) 수집 완료.")
+    print(f"✅ 총 {len(final_candidates)}개의 유니크한 장소 후보(Pool) 수집 완료. - KAKAO")
 
     return {"candidates": final_candidates}

@@ -4,7 +4,7 @@ from langchain_core.messages import SystemMessage
 from state import AgentState, ItineraryStrategy
 
 def allocator_node(state: AgentState):
-   print("\n⚖️ --- [Agent 2] Kakao 코드 기반 할당 전략 수립 중 ---")
+   print("\n⚖️ --- [Agent 2] 장소 할당 전략 수립 중 ---")
 
    # Agent 1의 결과 (TripPreferences)
    preferences = state['preferences']

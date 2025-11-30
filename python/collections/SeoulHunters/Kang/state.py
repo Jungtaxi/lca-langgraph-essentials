@@ -15,7 +15,7 @@ class TripPreferences(BaseModel):
     # 1. 기간
     duration: int = Field(
         1,
-        description="여행 기간. 예: '1', '2', '3' 등 체류할 기간을 숫자로 명시한다. 1박 2일이면 2일을 체류하기 때문에 2를 저장한다. 몇 박 묵을지는 궁금하지 않다. 명시되지 않으면 1."
+        description="체류 일자. 1박 2일이면 2일을 체류하기 때문에 2를 저장한다. 예: 당일치기: 1, 1박 2일: 2, 2박: 3 등 체류할 기간을 숫자로 명시한다."
     )
 
     # 2. 여행 지역 (여기에 추가!)
@@ -85,6 +85,7 @@ class TripPreferences(BaseModel):
         description="사용자가 입력한 언어(한/영/일/중 등)를 감지하세요. 그리고 해당 언어를 영어로 작성합니다.(예: Korean, English, Japanese, Chinese)"
     )
 
+# --- 2. Agent 2 데이터 스키마 (TripPreferences) ---
 class CategoryAllocation(BaseModel):
     tag_name: str = Field(
         description="테마에 맞는 태그 (예: 맛집, 카페, 관광지, 옷가게, 신발가게 등)"
@@ -116,6 +117,7 @@ class ItineraryStrategy(BaseModel):
         description="태그별 할당 리스트"
     )
 
+# --- 3. Agent 3 데이터 스키마 (TripPreferences) ---
 class CandidatePlace(BaseModel):
     place_name: str
     address: str
@@ -128,6 +130,9 @@ class CandidatePlace(BaseModel):
     keyword: str       # 검색 키워드
 
 class AgentState(TypedDict):
+
+    next_step: Literal["planner", "suggester", "path_finder", "general_chat"]
+
     # 1. 대화 기록 (공통)
     messages: Annotated[List[BaseMessage], operator.add]
 
@@ -135,7 +140,13 @@ class AgentState(TypedDict):
     preferences: Optional[TripPreferences]
 
     # 3. Agent 2의 결과물 (Search Strategy)
-    strategy: Optional[ItineraryStrategy]
+    strategy: Optional[ItineraryStrategy]   # tag_plan 역할
     
     # 4. Agent 3의 결과물 (Pool)
-    candidates : Optional[CandidatePlace]
+    candidates : Annotated[List[CandidatePlace], operator.add]
+
+    # 5. Agent 4의 결과물 (Top-3 Candidates)
+    main_place_candidates: Optional[List[CandidatePlace]]
+    
+    # 6. Agent 5의 결과물 (Route Locations)
+    selected_main_places: Optional[List[CandidatePlace]]

@@ -12,7 +12,7 @@ class Satisfied(BaseModel):
     satisfy: bool = Field(description="조건 충족 여부 (True/False)")
 
 def collector_node_naver(state: AgentState):
-    print("\n🏃 --- [Agent 3] 장소 수집 및 검증 (with search_local_places) ---")
+    print("\n🏃 --- [Agent 3]장소 수집 및 검증중 NAVER ---")
     
     strategy = state.get('strategy')
     preferences = state.get('preferences')
@@ -52,17 +52,17 @@ def collector_node_naver(state: AgentState):
             # [수정] search_local_places 함수 사용
             # (tools.py에 정의된 함수 시그니처에 맞춰 호출)
             places = search_local_places(kw, search_limit)
-            print("==== DEBUG ====")
-            print(tag_name)
-            print("==== KEYWORD ====")
-            print(kw)
-            print("==== PLACES ====")
-            print(places)
-            print(len(places))
-            print("==== END PLACES ====")
+            # print("==== DEBUG ====")
+            # print(tag_name)
+            # print("==== KEYWORD ====")
+            # print(kw)
+            # print("==== PLACES ====")
+            # print(places)
+            # print(len(places))
+            # print("==== END PLACES ====")
             for p in places:
-                print("---- PLACE ----")
-                print(p)
+                # print("---- PLACE ----")
+                # print(p)
                 # API 결과 키값 매핑 (search_local_places의 리턴 형태에 맞춰 조정 필요)
                 # 여기서는 Kakao API 표준 키('id', 'place_name' 등)를 가정합니다.
                 pid = p.get('title') 
@@ -87,11 +87,11 @@ def collector_node_naver(state: AgentState):
                 
                 적합하면 true, 아니면 false를 반환하세요.
                 """
-                print(p.get('title'))
-                print(p.get('category'))
+                # print(p.get('title'))
+                # print(p.get('category'))
                 try:
                     validation = structured_llm.invoke([SystemMessage(content=system_prompt)])
-                    print(validation.satisfy)
+                    # print(validation.satisfy)
                     if not validation.satisfy:
                         continue
                 except Exception as e:
@@ -115,6 +115,6 @@ def collector_node_naver(state: AgentState):
                 )
                 final_candidates.append(place_obj)
 
-    print(f"✅ 총 {len(final_candidates)}개의 장소 후보 수집 완료.")
+    print(f"✅ 총 {len(final_candidates)}개의 장소 후보 수집 완료. - NAVER")
     
     return {"candidates": final_candidates}

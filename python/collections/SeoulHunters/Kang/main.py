@@ -1,20 +1,25 @@
 import gradio as gr
 import pandas as pd
 import uuid
-import json
+import operator
+from typing import Annotated, List, Optional, TypedDict
 from langgraph.graph import StateGraph, END
 from langgraph.checkpoint.memory import MemorySaver
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_openai import ChatOpenAI
 
 # 모듈 import
-from state import AgentState
+from state import AgentState, CandidatePlace
+from agents.agent0_router import router_node
 from agents.agent1_planner import planner_node
 from agents.agent2_allocator import allocator_node
 from agents.agent3_collector_kakao import collector_node_kakao
 from agents.agent3_collector_naver import collector_node_naver
+from agents.agent4_suggester import suggester_node
+import folium
+# --- [UI 헬퍼] 번역 및 데이터프레임 변환 ---
 
-# --- [추가] 고정 UI 라벨 번역 사전 (속도/정확도 향상) ---
+# (기존 UI_LABELS, translate_text, translate_dataframe 등은 동일하게 유지)
 UI_LABELS = {
     # 1. 기획 (Planner) 관련
     "여행 지역": {"English": "Target Area", "Japanese": "旅行エリア", "Chinese": "旅游区域"},
@@ -38,106 +43,87 @@ UI_LABELS = {
     "주소": {"English": "Address", "Japanese": "住所", "Chinese": "地址"},
     "URL": {"English": "Map URL", "Japanese": "地図URL", "Chinese": "地图链接"}
 }
-# --- [0] 번역기 (Translation Layer) ---
-def translate_text(text, target_lang):
-    """
-    한국어 텍스트를 대상 언어로 번역합니다.
-    """
-    text = str(text) # 문자열 변환 안전장치
+
+
+def create_map_html(candidates):
+    """후보 장소 리스트를 받아 Folium 지도를 생성하고 HTML 문자열로 반환"""
+    if not candidates:
+        return "<div style='text-align:center'>장소가 없습니다.</div>"
     
-    # [수정] URL이거나, 한국어거나, 빈 값이면 번역 스킵
-    if text.startswith("http") or text.startswith("www"):
-        return text
-    if target_lang in ["Korean", "한국어"] or not text.strip():
-        return text
+    # 1. 지도 중심 좌표 계산 (평균값)
+    avg_lat = sum([c.y for c in candidates]) / len(candidates)
+    avg_lng = sum([c.x for c in candidates]) / len(candidates)
+    
+    # 2. 지도 생성 (OpenStreetMap 사용)
+    m = folium.Map(location=[avg_lat, avg_lng], zoom_start=13)
+    
+    # 3. 마커 추가
+    for i, c in enumerate(candidates, 1):
+        # 팝업 내용 (이름 + 카테고리)
+        popup_html = f"<b>{i}. {c.place_name}</b><br>{c.category}<br><a href='{c.place_url}' target='_blank'>상세보기</a>"
+        
+        folium.Marker(
+            [c.y, c.x],
+            popup=popup_html,
+            tooltip=f"{i}. {c.place_name}"
+        ).add_to(m)
+        
+    # HTML 문자열로 반환
+    return m._repr_html_()
+
+# [추가된 지도 생성 함수]
+def create_map_html(candidates):
+    if not candidates: return "<div>지도를 표시할 장소가 없습니다.</div>"
+    try:
+        lats = [c.y for c in candidates if c.y > 0]
+        lngs = [c.x for c in candidates if c.x > 0]
+        if not lats: return "<div>유효한 좌표가 없습니다.</div>"
+        
+        avg_lat, avg_lng = sum(lats)/len(lats), sum(lngs)/len(lngs)
+        m = folium.Map(location=[avg_lat, avg_lng], zoom_start=14)
+        
+        for i, c in enumerate(candidates, 1):
+            popup_html = f"<div style='width:150px'><b>{i}. {c.place_name}</b><br>{c.category}<br><a href='{c.place_url}' target='_blank'>Kakao Map</a></div>"
+            folium.Marker(
+                [c.y, c.x], popup=popup_html, tooltip=f"{i}. {c.place_name}"
+            ).add_to(m)
+        return m._repr_html_()
+    except Exception as e:
+        return f"<div>지도 생성 중 오류 발생: {e}</div>"
+    
+def translate_text(text, target_lang):
+    text = str(text)
+    if text.startswith("http") or text.startswith("www"): return text
+    if target_lang in ["Korean", "한국어"] or not text.strip(): return text
     
     llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
-    
-    system_prompt = f"""
-    You are a professional translator for a travel AI agent.
-    Translate the following Korean text into **{target_lang}**.
-    
-    [Rules]
-    1. Keep the tone professional yet friendly.
-    2. Do NOT translate proper nouns unless necessary.
-    3. Keep emojis as they are.
-    4. Return ONLY the translated text.
-    """
-    
-    sys_msg = SystemMessage(content=system_prompt)
-    msg = HumanMessage(content=text)
-    
+    system_prompt = f"Translate Korean to {target_lang}. Keep proper nouns/codes. Return only text."
     try:
-        response = llm.invoke([sys_msg, msg])
-        return response.content
-    except Exception as e:
-        print(f"Translation Error: {e}")
-        return text
-    
-# --- [수정] 데이터프레임 번역 함수 ---
-def translate_dataframe(df, target_lang):
-    """
-    데이터프레임의 컬럼과 내용을 번역합니다. (URL, 장소명 제외)
-    """
-    if target_lang in ["Korean", "한국어"] or df.empty:
-        return df
-    
-    # 1. 컬럼 번역 (UI 라벨 매핑)
-    col_map = {
-        "항목": "Item", "내용": "Content",
-        "카테고리": "Category", "가중치": "Weight", "목표 개수": "Target Count", 
-        "검색 키워드": "Keywords", "선정 이유": "Reason",
-        "장소명": "Place Name", "키워드": "Keyword", "주소": "Address"
-    }
-    
-    renamed_cols = {k: v for k, v in col_map.items() if k in df.columns}
-    df = df.rename(columns=renamed_cols)
+        res = llm.invoke([SystemMessage(content=system_prompt), HumanMessage(content=text)])
+        return res.content
+    except: return text
 
-    # 2. 내용 번역 (선별적 번역)
-    # 번역하면 안 되는 컬럼명 키워드 (각 언어별 장소명/URL 라벨 포함)
-    SKIP_KEYWORDS = [
-        "URL", "Link", "Place Name", "장소명", "場所名", "地点名称", 
-        "링크", "ID", "Code"
-    ]
+def translate_dataframe(df, target_lang):
+    if target_lang in ["Korean", "한국어"] or df.empty: return df
     
-    # 텍스트 컬럼만 대상
-    target_cols = [c for c in df.columns if df[c].dtype == 'object']
+    col_map = {
+        "항목": "Item", "내용": "Content", "카테고리": "Category", 
+        "장소명": "Place Name", "키워드": "Keyword", "주소": "Address",
+        "선정 이유": "Reason"
+    }
+    df = df.rename(columns={k: v for k,v in col_map.items() if k in df.columns})
+    
+    SKIP = ["URL", "Link", "Place Name", "장소명"]
+    target_cols = [c for c in df.columns if df[c].dtype == 'object' and not any(s in c for s in SKIP)]
     
     for col in target_cols:
-        # [핵심 수정] 컬럼 이름에 금지어(URL, 장소명 등)가 포함되어 있으면 번역 스킵!
-        if any(skip_word in col for skip_word in SKIP_KEYWORDS):
-            continue
-            
-        # 나머지(키워드, 주소, 이유 등)는 번역 진행
-        df[col] = df[col].apply(lambda x: translate_cell_value(str(x), "English", target_lang))
-        
+        df[col] = df[col].apply(lambda x: translate_text(str(x), target_lang))
     return df
 
-def translate_cell_value(text, lang_key, full_target_lang):
-    """
-    셀 값 하나를 번역하는 헬퍼 함수
-    1순위: UI_LABELS 사전 매칭 (빠름)
-    2순위: LLM 번역 (느리지만 정확)
-    """
-    # 1. 사전에 있는 단어인지 확인 (예: '여행 지역'이라는 값이 셀 안에 들어있을 경우)
-    if text in UI_LABELS and lang_key in UI_LABELS[text]:
-        return UI_LABELS[text][lang_key]
-    
-    # 2. 사전에 없으면 LLM 번역 (숫자나 짧은 기호는 패스)
-    if len(text) < 2 or text.isdigit():
-        return text
-        
-    return translate_text(text, full_target_lang)
-
-# --- [UI 헬퍼] 데이터프레임 변환 ---
 def format_prefs_to_df(prefs):
     if not prefs: return pd.DataFrame()
     data = prefs.model_dump()
-    display_map = {
-        "target_area": "여행 지역", "duration": "기간", "themes": "테마",
-        "intensity": "강도", "companions": "동행자", "transport": "이동수단",
-        "additional_notes": "요약/노트"
-    }
+    display_map = {"target_area": "여행 지역", "themes": "테마", "duration": "기간", "companions": "동행자"}
     table_data = []
     for key, label in display_map.items():
         val = data.get(key)
@@ -148,61 +134,81 @@ def format_prefs_to_df(prefs):
 def format_strategy_to_df(strategy):
     if not strategy: return pd.DataFrame()
     rows = []
-    # 가중치 높은 순 정렬
-    sorted_allocs = sorted(strategy.allocations, key=lambda x: x.weight, reverse=True)
-    for alloc in sorted_allocs:
-        rows.append({
-            "카테고리": alloc.tag_name, "가중치": alloc.weight, "목표 개수": alloc.count,
-            "검색 키워드": ", ".join(alloc.keywords), "선정 이유": alloc.reason
-        })
+    for alloc in sorted(strategy.allocations, key=lambda x: x.weight, reverse=True):
+        rows.append({"카테고리": alloc.tag_name, "키워드": ", ".join(alloc.keywords),  "선정 이유": alloc.reason})
     return pd.DataFrame(rows)
 
 def format_candidates_to_df(candidates):
     if not candidates: return pd.DataFrame()
-    
-    # [수정] Weight 별 상위 3개씩 필터링 로직
-    # 1. Weight 기준으로 그룹화하기 위해 데이터프레임 먼저 생성
-    df = pd.DataFrame([c.model_dump() for c in candidates])
-    
-    if df.empty: return df
-    
-    # 2. Weight 내림차순 정렬
-    df = df.sort_values(by="weight", ascending=False)
-    
-    # 3. 각 Weight(또는 카테고리 코드) 별로 상위 3개만 남기기
-    # (같은 Weight를 가진 그룹 내에서 3개 자르기)
-    df_filtered = df.groupby("tag_name").head(3)
-    
-    # 4. 필요한 컬럼만 선택 (Weight, Category 제거 요청 반영)
-    # "장소명", "키워드", "주소", "URL" 정도만 남김
-    result_df = df_filtered[["place_name", "keyword", "address", "place_url"]]
-    
-    # 컬럼명 한글로 변경
-    result_df.columns = ["장소명", "키워드", "주소", "URL"]
-    
-    return result_df
+    return pd.DataFrame([
+        {"장소명": c.place_name, "카테고리": c.category, "키워드": c.keyword, "주소": c.address}
+        for c in candidates[:100]
+    ])
 
-# --- 그래프 조립 (기존과 동일) ---
+def format_main_candidates_to_df(candidates):
+    if not candidates: return pd.DataFrame()
+    data = []
+    for c in candidates:
+        row = {"장소명": c.place_name, "카테고리": c.category, "주소": c.address, "URL": c.place_url}
+        data.append(row)
+    return pd.DataFrame(data)
+
+
+# 4. Conditional Edge 설정
+
+
+# 5. Graph 연결
+
+
+
+
+# --- 그래프 조립 ---
 workflow = StateGraph(AgentState)
+workflow.add_node("router", router_node)
 workflow.add_node("planner", planner_node)
 workflow.add_node("allocator", allocator_node)
-workflow.add_node("collector", collector_node_naver)
-workflow.set_entry_point("planner")
+workflow.add_node("kakao", collector_node_kakao)
+workflow.add_node("naver", collector_node_naver)
+workflow.add_node("suggester", suggester_node)
+# workflow.add_node("scheduler", agent5_schedule_node) # [Future] Agent 5 추가 예정
+def get_next_node(state):
+    return state["next_step"]
+
+workflow.set_entry_point("router")
+
+workflow.add_conditional_edges(
+    "router",
+    get_next_node,
+    {
+        "planner": "planner",
+        "suggester": "suggester",     # 유저가 "술집 보여줘" 하면 여기로
+        # "path_finder": "path_finder", # 유저가 "1번 갈래" 하면 여기로
+        "general_chat": END           # 잡담이면 그냥 답변하고 끝내거나 별도 노드로
+    }
+)
+
 def check_complete(state: AgentState):
     if state['preferences'].is_complete: return "allocator"
     return END
+
 workflow.add_conditional_edges("planner", check_complete, {"allocator": "allocator", END: END})
-workflow.add_edge("allocator", "collector")
-workflow.add_edge("collector", END)
+workflow.add_edge("allocator", "kakao")
+workflow.add_edge("allocator", "naver")
+workflow.add_edge("kakao", "suggester")
+workflow.add_edge("naver", "suggester")
+
+# [중요] Suggester 이후 Agent 5로 바로 가지 않고 일단 END.
+# 사용자가 채팅창에서 "여기 여기 갈래"라고 입력하면, 그때 Router가 판단해서 Agent 5로 보내는 구조가 됩니다.
+workflow.add_edge("suggester", END) 
+
 app = workflow.compile(checkpointer=MemorySaver())
 
-# --- [핵심] 유저 입력 처리 ---
+# --- Gradio 로직 ---
 def user_turn(user_message, history):
     if not user_message: return "", history
     history.append({"role": "user", "content": user_message})
     return "", history
 
-# --- [핵심] 봇 응답 처리 ---
 def bot_turn(history, thread_id):
     if not thread_id: thread_id = str(uuid.uuid4())
     config = {"configurable": {"thread_id": thread_id}}
@@ -213,20 +219,19 @@ def bot_turn(history, thread_id):
     accumulated_state = {}
     history.append({"role": "assistant", "content": "🤔 Thinking..."})
     
-    # [NEW] 감지된 언어 초기값
     detected_language = "Korean"
 
+    # [핵심 수정] 초기값을 루프 밖에서 미리 선언해야 에러가 안 납니다!
+    map_html = "<div style='text-align:center; padding:20px; color:gray;'>아직 지도가 생성되지 않았습니다.</div>"
     for output in app.stream(inputs, config=config):
         for node_name, state_update in output.items():
             accumulated_state.update(state_update)
             
-            # [NEW] Agent 1에서 감지된 언어 가져오기
             if 'preferences' in accumulated_state and accumulated_state['preferences']:
-                pref_lang = accumulated_state['preferences'].language
-                if pref_lang:
-                    detected_language = pref_lang
-            
-            # --- 로그 메시지 생성 (한국어) ---
+                if accumulated_state['preferences'].language:
+                    detected_language = accumulated_state['preferences'].language
+
+            # --- 로그 메시지 생성 ---
             kor_log = ""
             if node_name == "planner":
                 prefs = state_update['preferences']
@@ -234,18 +239,40 @@ def bot_turn(history, thread_id):
                     kor_log = f"❓ **Agent 1:** {prefs.missing_info_question}"
                 else:
                     kor_log = f"✅ **Agent 1:** 기획 완료!\n- 지역: {prefs.target_area}\n- 테마: {prefs.themes}"
-            elif node_name == "allocator":
-                strategy = state_update['strategy']
-                kor_log = f"\n⬇️\n📊 **Agent 2:** 전략 수립 완료!\n\n"
-                sorted_allocs = sorted(strategy.allocations, key=lambda x: x.weight, reverse=True)
-                for alloc in sorted_allocs[:5]:
-                    kor_log += f"- **[{alloc.tag_name}]** (W:{alloc.weight}): {alloc.reason[:30]}...\n"
-            elif node_name == "collector":
-                cands = state_update.get('candidates', [])
-                kor_log = f"\n⬇️\n🏃 **Agent 3:** 수집 완료! ({len(cands)}개)"
 
-            # --- [자동 번역 단계] ---
-            # detected_language로 채팅 메시지 번역
+            elif node_name == "allocator":
+                kor_log = f"\n ⬇️\n📊 **Agent 2:** 전략 수립 완료!"
+
+            elif node_name in ["kakao", "naver"]:
+                cands = accumulated_state.get('candidates', [])
+                source = "Kakao" if node_name == "kakao" else "Naver"
+                kor_log = f"\n ⬇️\n🏃 **Agent 3 ({source}):** 수집 중... (현재 누적 {len(cands)}개)"
+
+            # [핵심 수정] Agent 4 결과 출력 (체크박스 제거 -> 채팅창 리스트 출력)
+            elif node_name == "suggester":
+                main_cands = state_update.get('main_place_candidates', [])
+                # Folium 지도 HTML 생성
+                map_html = create_map_html(main_cands)
+                
+                # Markdown 리스트 생성
+                list_text = []
+                for i, c in enumerate(main_cands, 1):
+                    # URL이 있으면 링크 생성, 없으면 텍스트만
+                    link_text = f"[지도보기]({c.place_url})" if c.place_url else "(링크없음)"
+                    row = f"{i}. **{c.place_name}** ({c.category}) | {c.address} | {link_text}"
+                    list_text.append(row)
+                
+                candidates_str = "\n".join(list_text)
+                
+                kor_log = (
+                    f"\n ⬇️\n✨ **Agent 4:** 후보 장소를 엄선했습니다!\n\n"
+                    f"{candidates_str}\n\n"
+                    f"💡 **이 중에서 방문하고 싶은 곳을 말씀해 주시면, Agent 5가 최적의 루트를 짜드릴게요!**"
+                )
+
+            # --- 번역 및 UI 업데이트 ---
+            # 링크(Markdown Link)가 깨지지 않도록 주의하며 번역
+            # translate_text 함수가 URL을 건드리지 않도록 되어 있으므로 안전함
             final_display_log = translate_text(kor_log, detected_language)
             
             if final_display_log:
@@ -254,49 +281,50 @@ def bot_turn(history, thread_id):
                 else:
                     history[-1]['content'] += "\n\n" + final_display_log
             
-            # --- 데이터프레임 생성 및 번역 ---
+            # --- 데이터프레임 갱신 ---
             curr_pref = accumulated_state.get('preferences')
             curr_strat = accumulated_state.get('strategy')
-            curr_cands = accumulated_state.get('candidates')
+            curr_main_cands = accumulated_state.get('main_place_candidates')
             
-            # 1. 한국어 DF 생성
             df_p = format_prefs_to_df(curr_pref)
             df_s = format_strategy_to_df(curr_strat)
-            df_c = format_candidates_to_df(curr_cands) # 여기서 상위 3개 필터링 됨
+            df_m = format_main_candidates_to_df(curr_main_cands)
             
-            # 2. 감지된 언어로 번역 (한국어가 아닐 때만)
             if detected_language and detected_language not in ["Korean", "한국어"]:
                 df_p = translate_dataframe(df_p, detected_language)
                 df_s = translate_dataframe(df_s, detected_language)
-                df_c = translate_dataframe(df_c, detected_language)
+                df_m = translate_dataframe(df_m, detected_language)
+            # yield에 map_html 추가 (순서 주의)
+            yield history, thread_id, df_p, df_s, df_m, map_html
 
-            yield history, thread_id, df_p, df_s, df_c
+    # 최종 상태 한 번 더 yield
+    yield history, thread_id, df_p, df_s, df_m, map_html
 
-    # --- 최종 마무리 ---
-    pass 
-
-# --- Gradio UI 레이아웃 ---
+# --- Gradio UI (단순화됨) ---
 with gr.Blocks(title="Seoul Mate") as demo:
     tid_state = gr.State("")
     
     with gr.Row():
-        # 언어 선택 UI 제거됨 (자동 감지)
-        gr.Markdown("# 🇰🇷 Seoul Mate AI Agent")
+        gr.Markdown("# Seoul Hunters")
     
     with gr.Row():
         with gr.Column(scale=1):
             chatbot = gr.Chatbot(height=600)
-            msg = gr.Textbox(label="Input", placeholder="여행 계획을 이야기해주세요... (Start typing in any language)")
+            msg = gr.Textbox(label="Input", placeholder="여행 계획을 이야기해주세요...")
         
         with gr.Column(scale=1):
             with gr.Tabs():
                 with gr.Tab("1. Planner"):
                     df_pref_ui = gr.Dataframe(headers=["항목", "내용"], wrap=True)
                 with gr.Tab("2. Strategy"):
-                    df_strat_ui = gr.Dataframe(headers=["카테고리", "가중치", "목표 개수", "검색 키워드", "선정 이유"], wrap=True)
-                with gr.Tab("3. Collector"):
-                    # 필요한 컬럼만 표시 (장소명, 키워드, 주소, URL)
-                    df_cand_ui = gr.Dataframe(headers=["장소명", "키워드", "주소", "URL"], wrap=True)
+                    df_strat_ui = gr.Dataframe(headers=["카테고리", "키워드"], wrap=True)
+                
+                # [수정] 3번 탭을 '지도 & 제안'으로 통합
+                with gr.Tab("3. Map & Suggestion"):
+                    # 지도 표시용 HTML 컴포넌트
+                    map_output = gr.HTML(label="Interactive Map")
+                    # 후보 장소 리스트
+                    df_main_ui = gr.Dataframe(headers=["장소명", "카테고리", "주소", "URL"], wrap=True)
 
     msg.submit(
         user_turn, 
@@ -305,8 +333,8 @@ with gr.Blocks(title="Seoul Mate") as demo:
         queue=False
     ).then(
         bot_turn,
-        inputs=[chatbot, tid_state], # language_radio 인자 제거
-        outputs=[chatbot, tid_state, df_pref_ui, df_strat_ui, df_cand_ui]
+        inputs=[chatbot, tid_state],
+        outputs=[chatbot, tid_state, df_pref_ui, df_strat_ui, df_main_ui, map_output] # outputs 순서 주의!
     )
 
 if __name__ == "__main__":
