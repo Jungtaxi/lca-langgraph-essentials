@@ -129,7 +129,25 @@ class CandidatePlace(BaseModel):
     weight: float=Field(description="중요도 (Agent 2에서 받음)")       
     keyword: str  =Field(description="검색 키워드")     
 
+# [NEW] 개별 장소 스케줄 (방문 순서 포함)
+class ScheduledPlace(BaseModel):
+    place: CandidatePlace = Field(description="장소 정보 객체")
+    order: int = Field(description="그 날의 방문 순서 (1, 2, 3...)")
+    visit_time: str = Field(description="추천 방문 시간대 (예: 점심, 오후 2시)")
+    description: str = Field(description="이 장소를 이 시간에 배치한 이유")
 
+# [NEW] 하루 일정
+class DaySchedule(BaseModel):
+    day: int = Field(description="일차 (1, 2, 3...)")
+    places: List[ScheduledPlace] = Field(description="해당 날짜에 방문할 장소 리스트 (순서대로)")
+    daily_theme: str = Field(description="그 날의 테마 한 줄 요약")
+
+# [NEW] 전체 일정 (Agent 5의 최종 결과물)
+class FinalItinerary(BaseModel):
+    total_days: int = Field(description="총 여행 일수")
+    schedule: List[DaySchedule] = Field(description="일자별 스케줄 리스트")
+    overall_review: str = Field(description="전체 여행 코스에 대한 총평")
+    
 class AgentState(TypedDict):
 
     next_step: Literal["planner", "suggester", "path_finder", "general_chat"]
@@ -150,7 +168,8 @@ class AgentState(TypedDict):
     main_place_candidates: Optional[List[CandidatePlace]]
     
     # 6. Agent 5의 결과물 (Route Locations)
-    selected_main_places: Optional[List[CandidatePlace]]
+    # selected_main_places: Optional[List[CandidatePlace]] # <-- 이거 대신 아래꺼 사용
+    final_itinerary: Optional[FinalItinerary] # [NEW] 일자별로 구조화된 최종 일정
     
-    # 7. Agent 5의 결과물(경로에 대한 문자 설명)
+    # 7. 텍스트 설명 (유지하거나 final_itinerary 내부로 통합 가능)
     routes_text: str

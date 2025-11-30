@@ -64,4 +64,6 @@ def allocator_node(state: AgentState):
 
    result = structured_llm.invoke(message)
    print(result)
-   return {"strategy": result}
+   return {"strategy": result,
+           "candidates": []
+   }

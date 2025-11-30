@@ -46,72 +46,107 @@ UI_LABELS = {
 }
 
 
-def create_map_html(places, is_route=False):
+def create_map_html(data):
     """
-    places: 장소 리스트
-    is_route: True면 순서대로 선을 연결함 (Agent 5 결과용)
+    data: 
+      - List[CandidatePlace]: Agent 4 (제안) 단계 -> 단색 마커 표시
+      - FinalItinerary: Agent 5 (경로) 단계 -> 일자별 다른 색상 경로 표시
     """
-    if not places:
+    if not data:
         return "<div style='text-align:center; padding:20px; color:gray;'>지도에 표시할 데이터가 없습니다.</div>"
     
-    try:
-        # 좌표 유효성 검사 (0,0 제외)
-        valid_places = [p for p in places if p.x > 0 and p.y > 0]
+    # 지도 초기 중심 잡기 위한 좌표 수집
+    all_lats = []
+    all_lngs = []
+
+    # --- [Case 1] Agent 5: 최종 경로 (일자별 색상 구분) ---
+    if hasattr(data, 'schedule'): # FinalItinerary 객체인지 확인
         
-        if not valid_places:
-            return "<div>유효한 좌표가 없습니다.</div>"
+        # 일자별 색상 팔레트 (Folium 지원 색상)
+        colors = ['blue', 'red', 'green', 'purple', 'orange', 'darkred', 'darkblue', 'cadetblue']
         
-        # 중심 좌표 계산
-        avg_lat = sum(p.y for p in valid_places) / len(valid_places)
-        avg_lng = sum(p.x for p in valid_places) / len(valid_places)
+        # 좌표 수집 (중심 잡기용)
+        for day in data.schedule:
+            for sp in day.places:
+                if sp.place.y > 0 and sp.place.x > 0:
+                    all_lats.append(sp.place.y)
+                    all_lngs.append(sp.place.x)
         
+        if not all_lats: return "<div>유효한 좌표가 없습니다.</div>"
+        
+        # 지도 생성
+        avg_lat, avg_lng = sum(all_lats)/len(all_lats), sum(all_lngs)/len(all_lngs)
+        m = folium.Map(location=[avg_lat, avg_lng], zoom_start=13)
+
+        # 일자별 루프
+        for idx, day_schedule in enumerate(data.schedule):
+            # 색상 선택 (일자별 순환)
+            day_color = colors[idx % len(colors)]
+            day_coords = [] # 선 그리기용 좌표 리스트
+            
+            # 장소 루프
+            for sp in day_schedule.places:
+                place = sp.place
+                lat, lng = place.y, place.x
+                
+                if lat <= 0 or lng <= 0: continue
+                
+                day_coords.append((lat, lng))
+                
+                # 팝업 내용
+                popup_html = (
+                    f"<div style='min-width:150px'>"
+                    f"<b style='color:{day_color}'>[Day {day_schedule.day}] {sp.order}. {place.place_name}</b><br>"
+                    f"<span style='font-size:12px;'>{place.category}</span><br>"
+                    f"<span style='font-size:11px; color:gray'>{sp.visit_time}</span><br>"
+                    f"<a href='{place.place_url}' target='_blank'>Kakao Map</a>"
+                    f"</div>"
+                )
+                
+                # 마커 추가
+                folium.Marker(
+                    [lat, lng],
+                    popup=popup_html,
+                    tooltip=f"Day{day_schedule.day}-{sp.order}. {place.place_name}",
+                    icon=folium.Icon(color=day_color, icon='info-sign')
+                ).add_to(m)
+            
+            # [핵심] 일자별 경로 선 그리기
+            if len(day_coords) > 1:
+                folium.PolyLine(
+                    locations=day_coords,
+                    color=day_color,
+                    weight=5,
+                    opacity=0.8,
+                    tooltip=f"Day {day_schedule.day} 경로"
+                ).add_to(m)
+                
+        return m._repr_html_()
+
+    # --- [Case 2] Agent 4: 후보 제안 (단색 표시) ---
+    elif isinstance(data, list):
+        candidates = data
+        lats = [c.y for c in candidates if c.y > 0]
+        lngs = [c.x for c in candidates if c.x > 0]
+        
+        if not lats: return "<div>유효한 좌표가 없습니다.</div>"
+        
+        avg_lat, avg_lng = sum(lats)/len(lats), sum(lngs)/len(lngs)
         m = folium.Map(location=[avg_lat, avg_lng], zoom_start=13)
         
-        # 좌표 리스트 (선 그리기용)
-        route_coords = []
-
-        for i, p in enumerate(valid_places, 1):
-            lat, lng = p.y, p.x
-            route_coords.append((lat, lng))
-            
-            # 마커 색상 (경로 모드일 때: 출발=빨강, 도착=초록, 중간=파랑)
-            if is_route:
-                if i == 1: color = 'red'       # Start
-                elif i == len(valid_places): color = 'green' # End
-                else: color = 'blue'
-            else:
-                color = 'blue' # 일반 제안 모드
-
-            # 팝업 HTML
-            popup_html = (
-                f"<div style='min-width:150px'>"
-                f"<b>{i}. {p.place_name}</b><br>"
-                f"<span style='font-size:12px; color:gray'>{p.category}</span><br>"
-                f"<a href='{p.place_url}' target='_blank' style='text-decoration:none; color:blue;'>kakao map 🔗</a>"
-                f"</div>"
-            )
-            
+        for i, c in enumerate(candidates, 1):
+            popup_html = f"<div style='width:150px'><b>{i}. {c.place_name}</b><br>{c.category}<br><a href='{c.place_url}' target='_blank'>Kakao Map</a></div>"
             folium.Marker(
-                [lat, lng],
-                popup=popup_html,
-                tooltip=f"{i}. {p.place_name}",
-                icon=folium.Icon(color=color, icon='info-sign')
+                [c.y, c.x], 
+                popup=popup_html, 
+                tooltip=f"{i}. {c.place_name}",
+                icon=folium.Icon(color='blue', icon='star')
             ).add_to(m)
-
-        # [핵심] 경로 모드일 경우 선 그리기
-        if is_route and len(route_coords) > 1:
-            folium.PolyLine(
-                locations=route_coords,
-                color="blue",
-                weight=5,
-                opacity=0.7,
-                tooltip="추천 이동 경로"
-            ).add_to(m)
-
+            
         return m._repr_html_()
-        
-    except Exception as e:
-        return f"<div>Map Error: {str(e)}</div>"
+
+    else:
+        return "<div>지도 데이터 형식이 올바르지 않습니다.</div>"
     
 def translate_text(text, target_lang):
     text = str(text)
@@ -159,29 +194,6 @@ def format_strategy_to_df(strategy):
     for alloc in sorted(strategy.allocations, key=lambda x: x.weight, reverse=True):
         rows.append({"카테고리": alloc.tag_name, "키워드": ", ".join(alloc.keywords),  "선정 이유": alloc.reason})
     return pd.DataFrame(rows)
-
-def format_candidates_to_df(candidates):
-    if not candidates: return pd.DataFrame()
-    return pd.DataFrame([
-        {"장소명": c.place_name, "카테고리": c.category, "키워드": c.keyword, "주소": c.address}
-        for c in candidates[:100]
-    ])
-
-def format_main_candidates_to_df(candidates):
-    if not candidates: return pd.DataFrame()
-    data = []
-    for c in candidates:
-        row = {"장소명": c.place_name, "카테고리": c.category, "주소": c.address, "URL": c.place_url}
-        data.append(row)
-    return pd.DataFrame(data)
-
-
-# 4. Conditional Edge 설정
-
-
-# 5. Graph 연결
-
-
 
 
 # --- 그래프 조립 ---
@@ -276,7 +288,7 @@ def bot_turn(history, thread_id):
             elif node_name == "suggester":
                 main_cands = state_update.get('main_place_candidates', [])
                 # Folium 지도 HTML 생성
-                map_html = create_map_html(main_cands, is_route=False)
+                map_html = create_map_html(main_cands)
                 
                 # Markdown 리스트 생성
                 list_text = []
@@ -295,23 +307,25 @@ def bot_turn(history, thread_id):
                 )
             
             elif node_name=="path_finder":  ### 내가 main에서 agent5넣고 수정해야하는 것
-                # Agent5가 만든 동선 텍스트
-                routes_text = state_update.get("routes_text") or accumulated_state.get("routes_text", "")
+                # [수정] 구조화된 일정 객체(FinalItinerary)를 그대로 가져옴
+                final_itinerary = accumulated_state.get('final_itinerary')
                 
-                # 1. 확정된 경로 데이터 가져오기
-                # (Agent 5가 state['selected_main_places'] 또는 state['final_route']에 저장했다고 가정)
-                final_places = accumulated_state.get('selected_main_places', [])
-                
-                if final_places:
-                    # 2. 지도 업데이트 (is_route=True 로 선 그리기!)
-                    map_html = create_map_html(final_places, is_route=True)
+                if final_itinerary:
+                    # [핵심] 객체를 통째로 create_map_html에 넘김 (함수 안에서 타입 체크함)
+                    map_html = create_map_html(final_itinerary)
                     
-                    kor_log = (
-                        f"\n⬇️\n🚗 **Agent 5:** 경로 생성 완료!\n"
-                        f"{routes_text}"
-                    )
+                    # 로그 메시지 생성
+                    log_text = f"\n⬇️\n🚗 **Agent 5:** 최종 일정 생성 완료!\n\n**[총평]** {final_itinerary.overall_review}\n"
+                    
+                    for day in final_itinerary.schedule:
+                        # 일자별 테마 표시
+                        log_text += f"\n**📅 Day {day.day} - {day.daily_theme}**\n"
+                        for sp in day.places:
+                            log_text += f"{sp.order}. {sp.place.place_name} ({sp.visit_time})\n"
+                            
+                    kor_log = log_text
                 else:
-                    kor_log = "⚠️ 경로를 생성할 장소 데이터가 없습니다."
+                    kor_log = "⚠️ 일정 생성 실패."
             
                 
             # --- 번역 및 UI 업데이트 ---
@@ -328,21 +342,19 @@ def bot_turn(history, thread_id):
             # --- 데이터프레임 갱신 ---
             curr_pref = accumulated_state.get('preferences')
             curr_strat = accumulated_state.get('strategy')
-            curr_main_cands = accumulated_state.get('main_place_candidates')
+            
             
             df_p = format_prefs_to_df(curr_pref)
             df_s = format_strategy_to_df(curr_strat)
-            df_m = format_main_candidates_to_df(curr_main_cands)
             
             if detected_language and detected_language not in ["Korean", "한국어"]:
                 df_p = translate_dataframe(df_p, detected_language)
                 df_s = translate_dataframe(df_s, detected_language)
-                df_m = translate_dataframe(df_m, detected_language)
             # yield에 map_html 추가 (순서 주의)
-            yield history, thread_id, df_p, df_s, df_m, map_html
+            yield history, thread_id, df_p, df_s, map_html
 
     # 최종 상태 한 번 더 yield
-    yield history, thread_id, df_p, df_s, df_m, map_html
+    yield history, thread_id, df_p, df_s, map_html
 
 # --- Gradio UI (단순화됨) ---
 with gr.Blocks(title="Seoul Hunters") as demo:
@@ -367,8 +379,6 @@ with gr.Blocks(title="Seoul Hunters") as demo:
                 with gr.Tab("3. Map & Suggestion"):
                     # 지도 표시용 HTML 컴포넌트
                     map_output = gr.HTML(label="Interactive Map")
-                    # 후보 장소 리스트
-                    df_main_ui = gr.Dataframe(headers=["장소명", "카테고리", "주소", "URL"], wrap=True)
 
     msg.submit(
         user_turn, 
@@ -378,7 +388,7 @@ with gr.Blocks(title="Seoul Hunters") as demo:
     ).then(
         bot_turn,
         inputs=[chatbot, tid_state],
-        outputs=[chatbot, tid_state, df_pref_ui, df_strat_ui, df_main_ui, map_output] # outputs 순서 주의!
+        outputs=[chatbot, tid_state, df_pref_ui, df_strat_ui, map_output] # outputs 순서 주의!
     )
 
 if __name__ == "__main__":

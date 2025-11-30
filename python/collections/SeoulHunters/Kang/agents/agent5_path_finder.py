@@ -1,84 +1,82 @@
 import json
-import math
-from typing import List, Optional
 from langchain_openai import ChatOpenAI
-from langchain_core.messages import SystemMessage, HumanMessage
+from langchain_core.messages import SystemMessage
 from pydantic import BaseModel, Field
+from typing import List
 
 # state.py에서 정의한 클래스들 import
-from state import AgentState, CandidatePlace
+from state import AgentState, CandidatePlace, FinalItinerary, DaySchedule, ScheduledPlace
 
-# [1] LLM 출력용 스키마 (가볍게 이름만 리턴받음)
-class RoutePlanOutput(BaseModel):
-    ordered_place_names: List[str] = Field(
-        description="최적의 동선 순서대로 정렬된 장소 이름 리스트 (사용자 선택 포함 + 부족하면 Pool에서 추가)"
-    )
-    routes_text: str = Field(
-        description="해당 경로에 대한 매력적인 설명 (마크다운 형식)"
-    )
+# --- [LLM 출력용 스키마 (이름만 받기)] ---
+# CandidatePlace 객체 전체를 LLM이 뱉게 하면 망가지므로, 이름만 받아서 매핑함.
+class LLMPlaceRef(BaseModel):
+    place_name: str = Field(description="장소의 정확한 이름")
+    visit_time: str = Field(description="방문 시간대")
+    description: str = Field(description="동선 이유")
 
-# [2] 거리 계산 헬퍼 (단순 유클리드 거리, 정렬용)
-def calc_dist(p1, p2):
-    return math.sqrt((p1.x - p2.x)**2 + (p1.y - p2.y)**2)
+class LLMDaySchedule(BaseModel):
+    day: int
+    places: List[LLMPlaceRef]
+    daily_theme: str
+
+class LLMItineraryOutput(BaseModel):
+    total_days: int
+    schedule: List[LLMDaySchedule]
+    overall_review: str
+
 
 def agent5_route_node(state: AgentState) -> AgentState:
-    print("\n🚗 --- [Agent 5] 최종 경로 생성 및 최적화 ---")
+    print("\n🚗 --- [Agent 5] 일자별 상세 여행 경로 생성 ---")
     
-    messages = state["messages"]
-    last_user_msg = messages[-1].content
-
-    # 1. 데이터 준비
     prefs = state["preferences"]
-    place_pool = state.get("candidates") or []           # 전체 수집 데이터 (Agent 3)
-    main_candidates = state.get("main_place_candidates") or [] # 제안했던 후보 (Agent 4)
-    
-    # LLM에게 보여줄 데이터 경량화 (토큰 절약 & 집중력 향상)
-    # 전체 Pool을 다 보여주면 너무 많으니, Weight 상위 + 메인 후보만 추림
-    combined_pool = {p.place_name: p for p in place_pool + main_candidates} # 중복제거용 Dict
-    
-    # LLM에게 넘길 텍스트 요약본 생성
-    candidates_txt = ""
-    for name, p in list(combined_pool.items()): 
-        candidates_txt += f"- {name} ({p.category}, 키워드:{p.keyword}, 좌표:{p.y},{p.x})\n"
+    place_pool = state.get("candidates") or []
+    main_candidates = state.get("main_place_candidates") or []
+    user_selection_msg = state["messages"][-1].content # 사용자의 선택 ("1번이랑 3번")
 
-    # 2. 목표 방문 장소 개수 계산 (Intensity 기반)
-    intensity = prefs.intensity or 50
-    if intensity <= 30: target_count = 3
-    elif intensity <= 60: target_count = 4
-    else: target_count = 5
+    # 1. 데이터 준비 (Mapping용 Dict 생성)
+    combined_pool = {p.place_name: p for p in place_pool + main_candidates}
     
-    # Duration 고려 (1일 기준이므로 곱하기 1, 만약 N일이면 늘어남)
-    # 여기서는 '하루 코스'를 짜는 것으로 가정
+    # LLM에게 보여줄 텍스트
+    # (메인 후보는 강조, 나머지는 풀로 제공)
+    main_txt = ", ".join([f"{p.place_name}({p.category})" for p in main_candidates])
     
+    pool_txt = ""
+    for i, (name, p) in enumerate(list(combined_pool.items())[:50]): # 너무 많으면 자름
+        pool_txt += f"- {name} ({p.category}, 키워드:{p.keyword}, 좌표:{p.y:.3f},{p.x:.3f})\n"
+
+    # 2. 목표 일수 및 스팟 수 계산
+    duration = prefs.duration # (int)
+    intensity = prefs.intensity
+    spots_per_day = 4 if intensity <= 30 else (5 if intensity <= 60 else 6)
+
     # 3. LLM 설정
-    llm = ChatOpenAI(model="gpt-4.1", temperature=0) # gpt-4o 추천 (복잡한 추론 필요)
-    structured_llm = llm.with_structured_output(RoutePlanOutput)
+    llm = ChatOpenAI(model="gpt-4o", temperature=0) # 복잡한 작업은 gpt-4o 필수
+    structured_llm = llm.with_structured_output(LLMItineraryOutput)
 
-    # 4. 프롬프트 작성
+    # 4. 프롬프트
     system_prompt = f"""
     당신은 여행 동선 설계 전문가입니다.
-    사용자의 선택과 전체 후보군을 조합하여 **가장 효율적이고 매력적인 하루 여행 코스**를 짜세요.
+    사용자의 선택과 전체 장소 풀을 조합하여 **{duration}일간의 여행 코스**를 작성하세요.
 
     [사용자 프로필]
+    - 여행 기간: {duration}일 (반드시 Day 1 ~ Day {duration}까지 채울 것)
     - 테마: {prefs.themes}
-    - 강도: {intensity} (목표 방문지 수: 약 {target_count}곳)
+    - 목표 스팟 수: 하루 약 {spots_per_day}곳
     - 요청사항: "{prefs.additional_notes}"
 
-    [사용자가 보고 있던 추천 후보 (Agent 4 제안)]
-    {", ".join([p.place_name for p in main_candidates])}
+    [사용자가 선택한 후보 (필수 포함)]
+    (이전 단계 제안 목록: {main_txt})
+    사용자 피드백: "{user_selection_msg}"
+    -> 사용자가 선택한 장소는 **반드시** 일정에 포함하고 Anchor로 삼으세요.
 
-    [전체 이용 가능한 장소 풀 (Pool)]
-    {candidates_txt}
+    [이용 가능한 전체 장소 풀 (Pool)]
+    {pool_txt}
 
-    [사용자 입력 (선택 사항)]
-    "{last_user_msg}"
-
-    [동선 설계 규칙]
-    1. **사용자 선택 반영**: 사용자 입력에서 특정 장소를 선택했다면, 그 장소를 **반드시 포함**하고 **우선순위(Anchor)**로 두세요.
-    2. **빈자리 채우기**: 선택된 장소가 목표({target_count}개)보다 적다면, '장소 풀'에서 동선(좌표)과 테마 밸런스를 고려해 추가하세요.
-       - 동선 효율성: 선택된 장소와 좌표가 가까운 곳 위주로 선택.
-       - 테마 밸런스: 식당 -> 카페 -> 관광지 -> 쇼핑 순서 등 지루하지 않게 배치.
-    3. **출력**: 방문 순서대로 장소의 **'정확한 이름'**만 리스트에 담으세요.
+    [작성 규칙]
+    1. **일자별 분배**: 장소들의 **좌표(위도, 경도)**를 고려하여, 가까운 곳끼리 같은 날짜에 묶으세요. (동선 효율화)
+    2. **순서 배열**: 식사 -> 카페 -> 관광 -> 식사 등 상식적인 순서로 배치하세요.
+    3. **빈자리 채우기**: 선택된 장소만으로 부족하면, '장소 풀'에서 적절한 곳을 추가하여 하루 일정을 완성하세요.
+    4. **출력**: 장소 이름은 위 리스트에 있는 **정확한 이름**을 사용해야 매핑이 가능합니다.
     """
 
     # 5. 실행
@@ -86,47 +84,57 @@ def agent5_route_node(state: AgentState) -> AgentState:
         result = structured_llm.invoke([SystemMessage(content=system_prompt)])
     except Exception as e:
         print(f"Error in Agent 5: {e}")
-        return state
+        return state # 에러 시 기존 상태 반환
 
-    # 6. [핵심] LLM이 뱉은 이름(String)을 실제 객체(CandidatePlace)로 복원
-    # 이 과정이 있어야 지도에 핀이 찍힙니다.
-    final_route_objects = []
+    # 6. [핵심] LLM 결과를 실제 객체(FinalItinerary)로 변환 (매핑)
+    final_schedule = []
     
-    print(f"   📍 AI 제안 경로: {result.ordered_place_names}")
-    
-    for name in result.ordered_place_names:
-        # 이름이 유사한 객체를 찾음 (완전 일치 우선, 없으면 포함 여부)
-        found = None
-        
-        # 1차 시도: 완전 일치
-        if name in combined_pool:
-            found = combined_pool[name]
-        
-        # 2차 시도: 부분 일치 (LLM이 이름을 약간 줄여서 말했을 경우 대비)
-        if not found:
-            for real_name, p in combined_pool.items():
-                if name in real_name or real_name in name:
-                    found = p
-                    break
-        
-        if found:
-            final_route_objects.append(found)
-        else:
-            print(f"   ⚠️ 경고: '{name}'에 해당하는 장소 객체를 찾을 수 없습니다.")
+    for day_plan in result.schedule:
+        daily_places = []
+        for i, place_ref in enumerate(day_plan.places, 1):
+            # 이름으로 실제 객체 찾기
+            real_place_obj = None
+            
+            # 1. 완전 일치
+            if place_ref.place_name in combined_pool:
+                real_place_obj = combined_pool[place_ref.place_name]
+            else:
+                # 2. 부분 일치 (유연성)
+                for db_name, db_obj in combined_pool.items():
+                    if place_ref.place_name in db_name or db_name in place_ref.place_name:
+                        real_place_obj = db_obj
+                        break
+            
+            if real_place_obj:
+                # 스케줄 객체 생성
+                scheduled_p = ScheduledPlace(
+                    place=real_place_obj,
+                    order=i,
+                    visit_time=place_ref.visit_time,
+                    description=place_ref.description
+                )
+                daily_places.append(scheduled_p)
+            else:
+                print(f"   ⚠️ 경고: '{place_ref.place_name}' 매핑 실패")
 
-    # 7. State 업데이트
-    # selected_main_places에 '순서대로 정렬된 실제 객체 리스트'를 넣습니다.
-    # main.py의 create_map_html(is_route=True)가 이걸 보고 선을 그립니다.
-    
-    print(f"   ✅ 최종 경로 확정: {len(final_route_objects)}개 장소")
-    
-    # 기존 값을 덮어씁니다 (Agent 5의 결과가 최종 권위)
-    state["selected_main_places"] = final_route_objects
-    state['routes_text'] = result.routes_text
-    # 설명 텍스트는 별도 필드나 messages에 저장 가능하지만, 여기선 로그로만 확인
-    # (필요하다면 state에 'final_itinerary_text' 같은 필드 추가)
+        # 하루 일정 완성
+        day_schedule = DaySchedule(
+            day=day_plan.day,
+            places=daily_places,
+            daily_theme=day_plan.daily_theme
+        )
+        final_schedule.append(day_schedule)
+
+    # 최종 결과 객체
+    final_itinerary = FinalItinerary(
+        total_days=result.total_days,
+        schedule=final_schedule,
+        overall_review=result.overall_review
+    )
+
+    print(f"   ✅ 최종 일정 생성 완료: 총 {len(final_schedule)}일, {sum(len(d.places) for d in final_schedule)}개 장소")
     
     return {
-        "selected_main_places": final_route_objects,
-        # "messages": [AIMessage(content=result.routes_text)] # 필요시 주석 해제
+        "final_itinerary": final_itinerary,
+        "routes_text": result.overall_review # 간단한 텍스트용
     }
