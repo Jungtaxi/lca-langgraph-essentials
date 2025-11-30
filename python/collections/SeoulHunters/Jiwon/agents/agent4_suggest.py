@@ -1,66 +1,126 @@
+import json
 from typing import Any, Dict, List
-from state import AgentState
+from state import AgentState, TravelPreference, Place
+from openai import OpenAI 
+
+client = OpenAI()
+
 
 def _place_dict(p: Any) -> Dict:
     if hasattr(p, "model_dump"):
         return p.model_dump()
+    if isinstance(p, dict):
+        return p
     return dict(p)
 
+
+SYSTEM_PROMPT_AGENT4 = """
+당신은 여행 일정 플래너의 "메인 장소 추천 에이전트(Agent4)"입니다.
+
+## 역할
+- 사용자의 여행 취향(prefs)과 테마별 방문 계획(tag_plan), 후보 장소(place_pool)을 보고
+  "메인으로 잡을 만한 장소" 후보를 최대 3개 추천합니다.
+- 반드시 JSON 형식으로만 출력하세요.
+
+## 입력 정보 설명
+
+1. prefs
+   - 사용자의 기본 여행 취향
+   - themes, must_avoid 등 포함될 수 있음
+
+2. tag_plan
+   - {"tag": "...", "weight": 0.4} 같은 구조
+   - weight 높은 상위 2개 테마만 사용
+
+3. place_pool
+   - 실제 방문 가능한 장소 리스트
+   - theme, name, address, rating 등 포함 가능
+
+## 추천 규칙
+
+1. 테마 선택
+   - tag_plan의 weight 기준 상위 2개
+   - 유효하지 않으면 prefs.themes 상위 2개
+   - 그것도 없으면 ["맛집", "카페"] 기본값
+
+2. place_pool 필터
+   - 위 테마에 해당하는 장소만 선택
+   - name + address 기준 중복 제거
+   - must_avoid 있으면 가능한 한 제외
+
+3. 우선순위
+   - rating 높은 순
+   - review_count 높은 순
+   - 다양성 약간 고려
+
+4. 개수 제한
+   - 최대 3개
+
+## 출력 형식
+
+아래 예시처럼, JSON만 출력하세요.
+
+예시:
+{
+  "main_place_candidates": [
+    {
+      "name": "...",
+      "theme": "...",
+      "road_address": "...",
+      "address": "...",
+      "reason": "...",
+      "extra": {
+        "rating": 4.3,
+        "review_count": 122,
+        "notes": "..."
+      }
+    }
+  ]
+}
+
+설명 문장 없이, 위 형식과 같은 JSON만 출력하세요.
+main_place_candidate가 이미 있는데 agent4에 들어온 경우에는 마음에 안들어서 돌아온거니까 그걸 제외하고 
+다른 main_place_candidate을 골라주세요.
+"""
+
 def agent4_suggest_node(state: AgentState) -> AgentState:
-    """
-    역할:
-    - tag_plan + place_pool 을 기반으로
-      '가중치가 높은 테마의 장소 후보' 몇 개를 추천한다.
-    - 결과는 state["main_place_candidates"] 에 저장.
-    """
     prefs = state["prefs"]
-    tag_plan = state.get("tag_plan", []) or []
-    place_pool = state.get("place_pool", []) or []
+    tag_plan = state.get("tag_plan") or []
+    place_pool = state["place_pool"]
 
-    # 1) tag_plan에서 weight 높은 순으로 상위 몇 개 테마(tag) 추출
-    #    tag_plan 원소 예시 가정: {"tag": "맛집", "weight": 0.4, "visits": 4}
-    #    혹은 {"theme": "카페", "weight": 0.3, ...}
-    scored_tags: List[Dict] = []
-    for item in tag_plan:
-        if not isinstance(item, dict):
-            continue
-        tag = item.get("tag") or item.get("theme")
-        weight = item.get("weight", 0)
-        if tag:
-            scored_tags.append({"tag": tag, "weight": weight})
+    # 직렬화
+    if hasattr(prefs, "model_dump"):
+        prefs_payload = prefs.model_dump()
+    else:
+        prefs_payload = prefs
 
-    # 아무것도 없으면 기본 테마 fallback
-    if not scored_tags:
-        default_themes = prefs.themes or ["맛집", "카페"]
-        scored_tags = [{"tag": t, "weight": 1.0} for t in default_themes]
+    payload = {
+        "prefs": prefs_payload,
+        "tag_plan": tag_plan,
+        "place_pool": [_place_dict(p) for p in place_pool],
+    }
 
-    # weight 기준으로 정렬 후 상위 N개만 사용 (예: 2개)
-    scored_tags.sort(key=lambda x: x["weight"], reverse=True)
-    top_tags = [t["tag"] for t in scored_tags[:2]]
+    user_content = json.dumps(payload, ensure_ascii=False)
 
-    # 2) place_pool에서 해당 theme/tag에 해당하는 장소들 필터링
-    #    theme 필드가 "맛집", "카페" 등으로 들어있다고 가정.
-    candidates: List[Dict] = []
-    seen_keys = set()
+    completion = client.chat.completions.create(
+        model="gpt-4.1-mini",
+        messages=[
+            {"role": "system", "content": SYSTEM_PROMPT_AGENT4},
+            {"role": "user", "content": user_content},
+        ],
+        temperature=0,
+    )
 
-    for p in place_pool:
-        d = _place_dict(p)
-        theme = d.get("theme")
-        if not theme:
-            continue
-        if theme not in top_tags:
-            continue
+    raw_output = completion.choices[0].message.content or ""
 
-        key = (d.get("name"), d.get("road_address") or d.get("address"))
-        if key in seen_keys:
-            continue
-        seen_keys.add(key)
-        candidates.append(d)
+    try:
+        parsed = json.loads(raw_output)
+        main_place_candidates = parsed.get("main_place_candidates", [])
+        if not isinstance(main_place_candidates, list):
+            main_place_candidates = []
+    except json.JSONDecodeError:
+        main_place_candidates = []
 
-    MAX_CANDIDATES = 3
-    main_place_candidates = candidates[:MAX_CANDIDATES]
-
-    # state에 저장 (여기서는 dict 리스트 그대로 두고, 나중에 필요하면 Place로 다시 감싸도 됨)
     state["main_place_candidates"] = main_place_candidates
     return state
 
