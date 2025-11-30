@@ -49,7 +49,6 @@ def agent4_suggest_node(state: AgentState):
     [사용자 선호도]
     {json.dumps(prefs.model_dump(), indent=2, ensure_ascii=False)}
    
-
     [후보 장소 리스트 (Weight 상위 30개)]
     {candidate_summary}
 

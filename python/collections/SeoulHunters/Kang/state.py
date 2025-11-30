@@ -150,3 +150,6 @@ class AgentState(TypedDict):
     
     # 6. Agent 5의 결과물 (Route Locations)
     selected_main_places: Optional[List[CandidatePlace]]
+    
+    # 7. Agent 5의 결과물(경로에 대한 문자 설명)
+    routes_text: str

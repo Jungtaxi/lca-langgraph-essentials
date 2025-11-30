@@ -16,6 +16,7 @@ from agents.agent2_allocator import allocator_node
 from agents.agent3_collector_kakao import collector_node_kakao
 from agents.agent3_collector_naver import collector_node_naver
 from agents.agent4_suggest import agent4_suggest_node
+from agents.agent5_path_finder import agent5_route_node 
 import folium
 # --- [UI 헬퍼] 번역 및 데이터프레임 변환 ---
 
@@ -83,7 +84,7 @@ def create_map_html(candidates):
         m = folium.Map(location=[avg_lat, avg_lng], zoom_start=14)
         
         for i, c in enumerate(candidates, 1):
-            popup_html = f"<div style='width:150px'><b>{i}. {c.place_name}</b><br>{c.category}<br><a href='{c.place_url}' target='_blank'>Kakao Map</a></div>"
+            popup_html = f"<div style='width:150px'><b>{i}. {c.place_name}</b><br>{c.category}<br><a href='{c.place_url}' target='_blank'>Link</a></div>"
             folium.Marker(
                 [c.y, c.x], popup=popup_html, tooltip=f"{i}. {c.place_name}"
             ).add_to(m)
@@ -167,9 +168,10 @@ workflow = StateGraph(AgentState)
 workflow.add_node("router", router_node)
 workflow.add_node("planner", planner_node)
 workflow.add_node("allocator", allocator_node)
-workflow.add_node("kakao", collector_node_kakao)
+# workflow.add_node("kakao", collector_node_kakao)
 workflow.add_node("naver", collector_node_naver)
 workflow.add_node("suggester", agent4_suggest_node)
+workflow.add_node("path_finder", agent5_route_node) 
 # workflow.add_node("scheduler", agent5_schedule_node) # [Future] Agent 5 추가 예정
 def get_next_node(state):
     return state["next_step"]
@@ -182,7 +184,7 @@ workflow.add_conditional_edges(
     {
         "planner": "planner",
         "suggester": "suggester",     # 유저가 "술집 보여줘" 하면 여기로
-        # "path_finder": "path_finder", # 유저가 "1번 갈래" 하면 여기로
+        "path_finder": "path_finder", # 유저가 "1번 갈래" 하면 여기로
         "general_chat": END           # 잡담이면 그냥 답변하고 끝내거나 별도 노드로
     }
 )
@@ -192,13 +194,14 @@ def check_complete(state: AgentState):
     return END
 
 workflow.add_conditional_edges("planner", check_complete, {"allocator": "allocator", END: END})
-workflow.add_edge("allocator", "kakao")
+# workflow.add_edge("allocator", "kakao")
 workflow.add_edge("allocator", "naver")
-workflow.add_edge("kakao", "suggester")
+# workflow.add_edge("kakao", "suggester")
 workflow.add_edge("naver", "suggester")
 
 # [중요] Suggester 이후 Agent 5로 바로 가지 않고 일단 END.
 # 사용자가 채팅창에서 "여기 여기 갈래"라고 입력하면, 그때 Router가 판단해서 Agent 5로 보내는 구조가 됩니다.
+
 workflow.add_edge("suggester", END) 
 
 app = workflow.compile(checkpointer=MemorySaver())
@@ -269,7 +272,25 @@ def bot_turn(history, thread_id):
                     f"{candidates_str}\n\n"
                     f"💡 **이 중에서 방문하고 싶은 곳을 말씀해 주시면, Agent 5가 최적의 루트를 짜드릴게요!**"
                 )
-
+            
+            elif node_name=="path_finder":  ### 내가 main에서 agent5넣고 수정해야하는 것
+                # Agent5가 만든 동선 텍스트
+                routes_text = state_update.get("routes_text") or accumulated_state.get("routes_text", "")
+                
+                # 선택된 메인 스팟(또는 후보 스팟) 기준으로 지도 다시 그려주기 (선택사항)
+                main_cands = accumulated_state.get("selected_main_places") or accumulated_state.get("main_place_candidates")
+                if main_cands:
+                    map_html = create_map_html(main_cands)
+                
+                if not routes_text:
+                    kor_log = "🧭 **Agent 5:** 동선 정보를 찾지 못했어요. 다시 한 번 가고 싶은 장소를 말씀해 주세요!"
+                else:
+                    kor_log = (
+                        "🧭 **Agent 5:** 선택하신 장소들을 기준으로 아래와 같이 동선을 짜 보았어요.\n\n"
+                        f"{routes_text}"
+                    )
+            
+                
             # --- 번역 및 UI 업데이트 ---
             # 링크(Markdown Link)가 깨지지 않도록 주의하며 번역
             # translate_text 함수가 URL을 건드리지 않도록 되어 있으므로 안전함
@@ -301,7 +322,7 @@ def bot_turn(history, thread_id):
     yield history, thread_id, df_p, df_s, df_m, map_html
 
 # --- Gradio UI (단순화됨) ---
-with gr.Blocks(title="Seoul Mate") as demo:
+with gr.Blocks(title="Seoul Hunters") as demo:
     tid_state = gr.State("")
     
     with gr.Row():
