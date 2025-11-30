@@ -2,7 +2,7 @@ import gradio as gr
 import pandas as pd
 import uuid
 import operator
-from typing import Annotated, List, Optional, TypedDict
+from typing import Annotated, List, Optional, TypedDict 
 from langgraph.graph import StateGraph, END
 from langgraph.checkpoint.memory import MemorySaver
 from langchain_core.messages import HumanMessage, SystemMessage
@@ -15,7 +15,7 @@ from agents.agent1_planner import planner_node
 from agents.agent2_allocator import allocator_node
 from agents.agent3_collector_kakao import collector_node_kakao
 from agents.agent3_collector_naver import collector_node_naver
-from agents.agent4_suggester import suggester_node
+from agents.agent4_suggest import agent4_suggest_node
 import folium
 # --- [UI 헬퍼] 번역 및 데이터프레임 변환 ---
 
@@ -169,7 +169,7 @@ workflow.add_node("planner", planner_node)
 workflow.add_node("allocator", allocator_node)
 workflow.add_node("kakao", collector_node_kakao)
 workflow.add_node("naver", collector_node_naver)
-workflow.add_node("suggester", suggester_node)
+workflow.add_node("suggester", agent4_suggest_node)
 # workflow.add_node("scheduler", agent5_schedule_node) # [Future] Agent 5 추가 예정
 def get_next_node(state):
     return state["next_step"]

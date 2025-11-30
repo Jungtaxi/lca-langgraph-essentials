@@ -4,7 +4,7 @@ from langchain_openai import ChatOpenAI
 from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
 from langchain_core.prompts import ChatPromptTemplate
 from pydantic import BaseModel, Field
-import json
+import json 
 from langgraph.checkpoint.memory import MemorySaver
 
 from langgraph.graph import StateGraph, END, START, MessagesState
@@ -119,15 +119,15 @@ class ItineraryStrategy(BaseModel):
 
 # --- 3. Agent 3 데이터 스키마 (TripPreferences) ---
 class CandidatePlace(BaseModel):
-    place_name: str
-    address: str
-    category: str      # 카테고리 이름 (예: 음식점 > 한식)
-    tag_name: str      # 테마 이름 (예: 맛집, 카페, 관광지 등)
-    place_url: str
-    x: float           # 경도 (Longitude) - 계산을 위해 float 변환
-    y: float           # 위도 (Latitude)
-    weight: float        # 중요도 (Agent 2에서 받음)
-    keyword: str       # 검색 키워드
+    place_name: str = Field(description="장소 이름")
+    address: str = Field(description="주소")
+    category: str = Field(description="카테고리 이름 (예: 음식점 > 한식)")     
+    tag_name: str =Field(description="테마 이름 (예: 맛집, 카페, 관광지 등)")    
+    place_url: str =Field(description="장소의 홈페이지 주소")
+    x: float   =Field(description="경도 (Longitude) - 계산을 위해 float 변환")      
+    y: float    =Field(description="위도 (Latitude)")      
+    weight: float=Field(description="중요도 (Agent 2에서 받음)")       
+    keyword: str  =Field(description="검색 키워드")     
 
 class AgentState(TypedDict):
 

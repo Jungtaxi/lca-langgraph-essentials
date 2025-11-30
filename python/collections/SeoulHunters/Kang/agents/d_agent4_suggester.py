@@ -1,4 +1,4 @@
-from typing import Any, Dict, List
+from typing import Any, Dict, List 
 from state import AgentState
 
 def suggester_node(state: AgentState) -> AgentState:
@@ -58,11 +58,11 @@ def suggester_node(state: AgentState) -> AgentState:
     # state에 저장 (여기서는 dict 리스트 그대로 두고, 나중에 필요하면 Place로 다시 감싸도 됨)
     return {"main_place_candidates": main_place_candidates}
 
-def agent4_wait_node(state: AgentState) -> AgentState:
-    """
-    역할:
-    - agent4_suggest_node가 main_place_candidates를 채운 뒤
-      그래프를 여기서 멈추게 하기 위한 '대기 노드'
-    - 여기서는 state를 건드리지 않고 그대로 반환만 함.
-    """
-    return state
+# def agent4_wait_node(state: AgentState) -> AgentState:
+#     """
+#     역할:
+#     - agent4_suggest_node가 main_place_candidates를 채운 뒤
+#       그래프를 여기서 멈추게 하기 위한 '대기 노드'
+#     - 여기서는 state를 건드리지 않고 그대로 반환만 함.
+#     """
+#     return state
